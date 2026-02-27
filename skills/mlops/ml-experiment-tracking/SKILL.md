@@ -93,9 +93,7 @@ mlflow.xgboost.autolog()
 # LightGBM
 mlflow.lightgbm.autolog()
 
-# HuggingFace Transformers
-import os
-os.environ["HF_MLFLOW_LOG_ARTIFACTS"] = "1"
+# HuggingFace Transformers (MLflow >= 2.6)
 mlflow.transformers.autolog()
 ```
 

@@ -247,7 +247,7 @@ class CostAwareLLMPipeline:
 |-------|-----------|------------|-------|---------|
 | GPT-4o | $2.50 | $10.00 | Fast | Excellent |
 | GPT-4o-mini | $0.15 | $0.60 | Very fast | Good |
-| Claude Sonnet 4 | $3.00 | $15.00 | Fast | Excellent |
+| Claude Sonnet 4.6 | $3.00 | $15.00 | Fast | Excellent |
 | Claude Haiku 4.5 | $0.80 | $4.00 | Very fast | Good |
 | Llama 3.1 8B (self-hosted) | ~$0.05 | ~$0.05 | Fast | Good |
 | Llama 3.1 70B (self-hosted) | ~$0.30 | ~$0.30 | Medium | Very good |
