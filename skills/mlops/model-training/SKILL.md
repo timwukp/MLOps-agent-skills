@@ -99,7 +99,7 @@ def train_pytorch(model, train_loader, val_loader, config):
         weight_decay=config.get("weight_decay", 0.01),
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config["epochs"]
+        optimizer, T_max=config["epochs"] * len(train_loader)
     )
     scaler = GradScaler()  # Mixed precision
     criterion = nn.CrossEntropyLoss()
@@ -113,12 +113,12 @@ def train_pytorch(model, train_loader, val_loader, config):
         train_loss = 0
         for batch_idx, (X, y) in enumerate(train_loader):
             X, y = X.to(device), y.to(device)
+            optimizer.zero_grad()
 
             with autocast():  # Mixed precision forward pass
                 output = model(X)
                 loss = criterion(output, y)
 
-            optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

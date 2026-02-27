@@ -164,18 +164,21 @@ online_features = store.get_online_features(
 ```python
 def check_feature_freshness(store, feature_view_name, max_staleness_hours=24):
     """Check if materialized features are fresh enough."""
-    from feast.infra.registry.registry import Registry
+    from datetime import datetime, timezone
 
     fv = store.get_feature_view(feature_view_name)
-    last_materialization = fv.materialization_intervals[-1].end_date
+    # Use registry metadata for last materialization time
+    registry = store.registry
+    last_applied = registry.get_feature_view(feature_view_name, store.project).last_updated_timestamp
 
-    staleness = datetime.utcnow() - last_materialization
+    now = datetime.now(timezone.utc)
+    staleness = now - last_applied
     is_fresh = staleness.total_seconds() < max_staleness_hours * 3600
 
     return {
         "feature_view": feature_view_name,
-        "last_materialized": last_materialization.isoformat(),
-        "staleness_hours": staleness.total_seconds() / 3600,
+        "last_updated": last_applied.isoformat(),
+        "staleness_hours": round(staleness.total_seconds() / 3600, 1),
         "is_fresh": is_fresh,
     }
 ```
@@ -241,9 +244,9 @@ def streaming_feature_pipeline(store, topic, feature_view_name):
         features = record["features"]
         timestamp = datetime.fromisoformat(record["timestamp"])
 
-        # Write to online store
-        store.write_to_online_store(
-            feature_view_name=feature_view_name,
+        # Push features to online store
+        store.push(
+            push_source_name=feature_view_name + "_push",
             df=pd.DataFrame([{**entity_key, **features, "event_timestamp": timestamp}]),
         )
 ```

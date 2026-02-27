@@ -214,6 +214,10 @@ spec:
       app: model-server
       version: v2
   template:
+    metadata:
+      labels:
+        app: model-server
+        version: v2
     spec:
       containers:
       - name: model-server
