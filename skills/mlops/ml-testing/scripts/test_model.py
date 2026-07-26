@@ -168,7 +168,15 @@ def performance_regression_tests(
 
 
 def slice_tests(model, X, y, task: str, slice_col: str) -> Dict[str, Any]:
-    """Evaluate model performance on each unique value of *slice_col*."""
+    """
+    Evaluate model performance on each unique value of *slice_col*.
+
+    The comparison baseline is the metric on the FULL dataset, not the mean of
+    the per-slice metrics. Those differ whenever slices have unequal sizes: an
+    unweighted mean of slice accuracies over-weights tiny slices, so a model that
+    is 95% accurate on a 10,000-row slice and 40% on a 20-row slice gets a
+    "global" figure of 67.5% and the bad slice never gets flagged.
+    """
     import numpy as np
 
     slices: Dict[str, Any] = {}
@@ -188,17 +196,30 @@ def slice_tests(model, X, y, task: str, slice_col: str) -> Dict[str, Any]:
             mae = mean_absolute_error(y_slice, preds)
             slices[str(value)] = {"count": int(len(idx)), "mae": round(mae, 4)}
 
-    # Flag underperforming slices (> 10 % worse than global metric)
+    # Flag underperforming slices (> 10 % worse than the FULL-DATASET metric)
+    preds_all = model.predict(X)
     if task == "classification":
-        global_metric = float(np.mean([s["accuracy"] for s in slices.values()]))
-        for name, s in slices.items():
-            s["underperforming"] = s["accuracy"] < global_metric * 0.90
-    else:
-        global_metric = float(np.mean([s["mae"] for s in slices.values()]))
-        for name, s in slices.items():
-            s["underperforming"] = s["mae"] > global_metric * 1.10
+        from sklearn.metrics import accuracy_score
 
-    return {"slice_column": slice_col, "slices": slices, "global_metric": round(global_metric, 4)}
+        global_metric = float(accuracy_score(y, preds_all))
+        for s in slices.values():
+            s["underperforming"] = s["accuracy"] < global_metric * 0.90
+        metric_name = "accuracy"
+    else:
+        from sklearn.metrics import mean_absolute_error
+
+        global_metric = float(mean_absolute_error(y, preds_all))
+        for s in slices.values():
+            s["underperforming"] = s["mae"] > global_metric * 1.10
+        metric_name = "mae"
+
+    return {
+        "slice_column": slice_col,
+        "slices": slices,
+        "global_metric": round(global_metric, 4),
+        "global_metric_name": metric_name,
+        "global_metric_basis": "full dataset (not the mean of per-slice metrics)",
+    }
 
 
 def boundary_tests(model, X) -> Dict[str, Any]:
@@ -324,8 +345,14 @@ def generate_markdown(report: Dict[str, Any]) -> str:
     lines = ["# ML Model Test Report", "", f"**Timestamp:** {report['timestamp']}",
              f"**Model:** `{report['model_path']}`", f"**Task:** {report['task']}", ""]
 
-    overall = report.get("overall_pass", "N/A")
-    lines.append(f"**Overall result:** {'PASS' if overall else 'FAIL'}")
+    # A missing key must render as UNKNOWN, not PASS. The old default of "N/A"
+    # is a truthy string, so an absent overall_pass printed "PASS".
+    overall = report.get("overall_pass")
+    if overall is None:
+        overall_label = "UNKNOWN (overall_pass not set)"
+    else:
+        overall_label = "PASS" if overall else "FAIL"
+    lines.append(f"**Overall result:** {overall_label}")
     lines.append("")
 
     # Performance

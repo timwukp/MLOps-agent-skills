@@ -52,12 +52,18 @@ Track classification metrics (accuracy, precision, recall, F1, AUC-ROC, calibrat
 Monitor model output distributions over time, independent of ground truth. Prediction drift often precedes performance degradation.
 
 ```python
-from evidently.report import Report
-from evidently.metric_preset import TargetDriftPreset
+# Evidently 0.7+ (TargetDriftPreset is removed; scope DataDriftPreset
+# to the prediction column instead)
+from evidently import Report, Dataset, DataDefinition
+from evidently.presets import DataDriftPreset
 
-report = Report(metrics=[TargetDriftPreset()])
-report.run(reference_data=reference_df, current_data=current_df)
-report.save_html("prediction_drift_report.html")
+definition = DataDefinition(numerical_columns=["prediction"])
+reference = Dataset.from_pandas(reference_df, data_definition=definition)
+current = Dataset.from_pandas(current_df, data_definition=definition)
+
+report = Report([DataDriftPreset(columns=["prediction"])])
+snapshot = report.run(current, reference)
+snapshot.save_html("prediction_drift_report.html")
 ```
 
 ## Alerting Strategies and Thresholds
@@ -67,8 +73,8 @@ report.save_html("prediction_drift_report.html")
 | Severity | Condition                                    | Response Time | Channel          |
 |----------|----------------------------------------------|---------------|------------------|
 | Critical | Serving errors > 1%, monitoring failure      | 15 min        | PagerDuty, SMS   |
-| High     | Performance drop > 5%, PSI > 0.25            | 1 hour        | Slack, email     |
-| Medium   | Feature drift (PSI 0.1-0.25), volume anomaly | 4 hours       | Slack channel    |
+| High     | Performance drop > 5%, PSI > 0.2             | 1 hour        | Slack, email     |
+| Medium   | Feature drift (PSI 0.1-0.2), volume anomaly  | 4 hours       | Slack channel    |
 | Low      | Minor shift (PSI < 0.1), slight latency rise | Next day      | Dashboard, digest|
 
 ### PSI Interpretation
@@ -76,15 +82,17 @@ report.save_html("prediction_drift_report.html")
 | PSI Value  | Interpretation               | Action                              |
 |------------|------------------------------|-------------------------------------|
 | < 0.1      | No significant change        | No action needed                    |
-| 0.1 - 0.25| Moderate shift               | Investigate, consider retraining    |
-| 0.25 - 0.5| Significant shift            | Retrain, root cause analysis        |
+| 0.1 - 0.2 | Moderate shift               | Investigate, consider retraining    |
+| 0.2 - 0.5 | Significant shift            | Retrain, root cause analysis        |
 | > 0.5     | Severe distribution change   | Immediate investigation, fallback   |
+
+Note: 0.1/0.2 is the credit-risk industry convention (used consistently with the model-drift-detection skill); some references use 0.25 as the "significant" cutoff. Pick one convention and apply it uniformly.
 
 ```yaml
 # Alert configuration example
 alerts:
   drift:
-    feature_drift_psi: { warning: 0.1, critical: 0.25 }
+    feature_drift_psi: { warning: 0.1, critical: 0.2 }
     prediction_drift_ks: { warning: 0.05, critical: 0.1 }
   performance:
     accuracy_drop: { warning: 0.02, critical: 0.05 }

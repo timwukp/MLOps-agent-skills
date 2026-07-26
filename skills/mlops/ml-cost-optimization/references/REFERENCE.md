@@ -4,21 +4,30 @@
 
 ### Cloud GPU Instances (Approximate Pricing, 2025)
 
-| GPU | VRAM | FP16 TFLOPS | Architecture | AWS On-Demand ($/hr) | AWS Spot ($/hr) | GCP On-Demand ($/hr) | Azure On-Demand ($/hr) | Best For |
-|-----|------|-------------|-------------|---------------------|-----------------|---------------------|----------------------|----------|
-| NVIDIA T4 | 16 GB | 65 | Turing | $0.53 (g4dn.xlarge) | $0.16 | $0.35 (n1+T4) | $0.53 (NC4as_T4_v3) | Inference, small models |
-| NVIDIA V100 16GB | 16 GB | 125 | Volta | $3.06 (p3.2xlarge) | $0.92 | $2.48 (a2+V100) | $3.06 (NC6s_v3) | General training |
-| NVIDIA V100 32GB | 32 GB | 125 | Volta | $3.06 (p3.2xlarge) | $0.92 | $2.48 | $3.06 | Large batch training |
-| NVIDIA A10G | 24 GB | 62.5 | Ampere | $1.01 (g5.xlarge) | $0.35 | N/A | N/A | Inference, fine-tuning |
-| NVIDIA A100 40GB | 40 GB | 312 | Ampere | $3.67 (p4d 1-GPU) | $1.10 | $2.94 (a2-highgpu-1g) | $3.40 (NC24ads_A100) | Large model training |
-| NVIDIA A100 80GB | 80 GB | 312 | Ampere | $4.10 (p4de 1-GPU) | $1.50 | $3.67 (a2-ultragpu-1g) | $3.67 | Very large models |
-| NVIDIA H100 80GB | 80 GB | 990 | Hopper | $8.00+ (p5 1-GPU) | $2.50 | $5.07 (a3-highgpu-1g) | $7.35 (ND96isr_H100) | LLM training, peak perf |
-| NVIDIA L4 | 24 GB | 121 | Ada Lovelace | $0.81 (g6.xlarge) | $0.28 | $0.35 (g2-standard-4) | N/A | Cost-effective inference |
+Read the two TFLOPS columns carefully: **dense** is what a normal training run
+gets; **sparse** is the 2x marketing figure that requires a 2:4-sparsified model.
+All prices are **per GPU** (multi-GPU instance price divided by GPU count), Linux
+on-demand, us-east-1 / us-central1 / East US.
+
+| GPU | VRAM | FP16 dense TFLOPS | FP16 sparse TFLOPS | Architecture | AWS On-Demand ($/GPU-hr) | AWS Spot ($/GPU-hr, indicative) | GCP On-Demand ($/GPU-hr) | Azure On-Demand ($/GPU-hr) | Best For |
+|-----|------|-------------------|--------------------|--------------|--------------------------|--------------------------------|--------------------------|----------------------------|----------|
+| NVIDIA T4 | 16 GB | 65 | 130 | Turing | $0.526 (g4dn.xlarge) | ~$0.16 | ~$0.70 (n1-standard-4 + T4; the often-quoted $0.35 is accelerator-only) | $0.53 (NC4as_T4_v3) | Inference, small models |
+| NVIDIA V100 16GB | 16 GB | 125 | n/a (no structured sparsity) | Volta | $3.06 (p3.2xlarge) | ~$0.92 | ~$2.48 (n1 + V100) | $3.06 (NC6s_v3) | General training |
+| NVIDIA V100 32GB | 32 GB | 125 | n/a | Volta | $3.90 (p3dn.24xlarge $31.21 / 8 — 32 GB V100s exist ONLY on p3dn) | ~$1.17 | ~$2.55 | ~$3.20 | Large batch training |
+| NVIDIA A10G | 24 GB | 62.5 | 125 | Ampere | $1.006 (g5.xlarge) | ~$0.35 | N/A (GCP offers L4 instead) | N/A | Inference, fine-tuning |
+| NVIDIA L4 | 24 GB | 121 | 242 | Ada Lovelace | $0.805 (g6.xlarge) | ~$0.28 | ~$0.71 (g2-standard-4; $0.35 figure is accelerator-only) | N/A | Cost-effective inference |
+| NVIDIA L40S | 48 GB | 366 | 733 | Ada Lovelace | $1.861 (g6e.xlarge) | ~$0.70 | ~$2.00 (g4 family) | ~$2.00 | Mid-size training; no NVLink |
+| NVIDIA A100 40GB | 40 GB | 312 | 624 | Ampere | $4.10 (p4d.24xlarge $32.77 / 8) | ~$1.30 | ~$3.67 (a2-highgpu-1g, incl. VM) | $3.40 (NC24ads_A100_v4) | Large model training |
+| NVIDIA A100 80GB | 80 GB | 312 | 624 | Ampere | $5.12 (p4de.24xlarge $40.97 / 8) | ~$1.80 | ~$5.07 (a2-ultragpu-1g) | ~$4.80 | Very large models |
+| NVIDIA H100 80GB SXM | 80 GB | **494** | 989 | Hopper | $12.29 (p5.48xlarge $98.32 / 8) | ~$6.00 (scarce) | ~$11.00 (a3-highgpu-8g / 8) | ~$9.20 (ND96isr_H100_v5 / 8) | LLM training, peak perf |
+| NVIDIA H200 141GB SXM | 141 GB | 494 | 989 | Hopper | ~$11 (p5e/p5en / 8) | ~$6.00 (scarce) | ~$11 (a3-ultragpu / 8) | ~$10 | Memory-bandwidth-bound LLM work |
 
 **Notes**:
-- Prices are approximate and vary by region. Check cloud provider pricing pages for current rates.
-- Spot/preemptible pricing fluctuates based on demand.
-- Multi-GPU instances offer bulk discounts (e.g., 8x A100 on p4d.24xlarge is ~$32/hr total).
+- Prices are point-in-time list prices and vary by region; re-check the provider pricing pages before budgeting.
+- Spot/preemptible pricing is a live market. It moves by AZ, instance type, and hour, and A100/H100 spot **capacity is frequently unavailable** in AWS/GCP/Azure. The sub-$3/hr H100 rates you see quoted are neocloud on-demand (Lambda, CoreWeave, RunPod), not big-three spot.
+- GCP prices GPUs as a separate SKU from the VM. An "accelerator-only" figure (T4 ~$0.35, L4 ~$0.28) excludes the machine it is attached to; the usable rate is roughly double.
+- Multi-GPU instances are priced as a unit (8x A100 40GB on p4d.24xlarge is ~$32.77/hr total); the per-GPU column above already divides this out. Committed use / savings plans and reserved capacity blocks discount these figures a further 30-60%.
+- Newer parts (Blackwell B200/GB200, AMD MI300X 192 GB, Trainium2, TPU v5e/v6e) are in varying stages of GA with limited regional availability — price them directly rather than extrapolating from H100.
 
 ### GPU Memory Requirements by Model Size
 
@@ -31,7 +40,12 @@
 | 7B (LLaMA-7B) | ~28 GB | ~14 GB | ~7 GB | A100 40GB |
 | 13B (LLaMA-13B) | ~52 GB | ~26 GB | ~13 GB | A100 80GB |
 | 30B | ~120 GB | ~60 GB | ~30 GB | 2x A100 80GB |
-| 70B (LLaMA-70B) | ~280 GB | ~140 GB | ~70 GB | 4x A100 80GB or 2x H100 |
+| 70B (LLaMA-70B) | ~280 GB | ~140 GB | ~70 GB | 4x A100 80GB, 2x H100, or 1x H200 (INT8) |
+
+These figures are **weights only** — they describe inference footprint. For
+training, add gradients and optimizer state (see the rule of thumb below), plus KV
+cache for autoregressive inference (roughly
+`2 x n_layers x n_kv_heads x head_dim x seq_len x batch x bytes_per_element`).
 
 **Training memory rule of thumb** (with Adam optimizer):
 - FP32 training: ~4x model parameter memory (model + gradients + optimizer states)
@@ -55,7 +69,7 @@
 | FP16 / BF16 | Half precision | < 0.1% | 2x | Minimal | 1.5-3x | Not needed | No |
 
 **When to use which**:
-- **Dynamic INT8**: Default starting point. Free accuracy, easy to apply.
+- **Dynamic INT8**: Default starting point — cheapest to apply (no calibration, no retraining), not free: budget the 0.1-1% accuracy loss from the table above and measure it on your own eval set before shipping.
 - **Static INT8**: When dynamic is not fast enough and you have calibration data.
 - **QAT**: When accuracy is critical and you can afford retraining.
 - **GPTQ/AWQ**: For LLMs that must fit in limited GPU memory.
@@ -68,12 +82,25 @@
 |--------|------|----------------|-----------------|-------------|-----------------|
 | Magnitude (L1) unstructured | Unstructured | 50-95% | Low at 50%, moderate at 90% | Minimal without sparse kernels | NVIDIA Ampere+ (2:4 sparsity) |
 | Random unstructured | Unstructured | 50-80% | Moderate | Minimal | Same as above |
-| Structured (channel) | Structured | 20-60% | Moderate | Direct (smaller model) | All hardware |
-| Structured (attention head) | Structured | 20-50% | Low-moderate | Direct | All hardware |
+| Structured (channel) | Structured | 20-60% | Moderate | Direct, but ONLY after the channels are physically removed | All hardware |
+| Structured (attention head) | Structured | 20-50% | Low-moderate | Direct, after physical removal | All hardware |
 | Movement pruning | Unstructured | 70-95% | Low (with fine-tuning) | Requires sparse kernels | NVIDIA Ampere+ |
 | Lottery Ticket | Unstructured | 80-95% | Can match original | Requires sparse kernels | NVIDIA Ampere+ |
 
 **Key insight**: Unstructured pruning achieves high sparsity but requires specialized hardware/software for actual speedup. Structured pruning gives smaller models that run faster on any hardware.
+
+**Masking is not compression.** `torch.nn.utils.prune.*` (including
+`ln_structured`) installs a binary mask and a `weight_orig` parameter; the tensor
+keeps its original shape, the dense GEMM keeps its original cost, and the
+checkpoint gets *larger* (mask + original weights) until you call
+`prune.remove()`. Even after `prune.remove()` you have zeros in a dense tensor —
+FLOPs are unchanged. To realize a structured-pruning speedup you must rebuild the
+layers at the reduced width and copy the surviving channels across (or use a tool
+that does it: `torch.nn.utils.prune` + manual surgery, NVIDIA TensorRT
+pruning-aware workflows, `nni` / `torch-pruning`). For unstructured sparsity, the
+only mainstream hardware path is NVIDIA Ampere+ 2:4 semi-structured sparsity via
+`torch.sparse.to_sparse_semi_structured` plus a sparsity-aware runtime such as
+TensorRT — 50% sparsity in that exact pattern, not arbitrary 90%.
 
 ### Knowledge Distillation Variants
 
@@ -156,13 +183,29 @@ Hardware_Depreciation = Total_Hardware_Cost / Useful_Life_Years
 
 Power_Cost = Num_GPUs * TDP_kW * PUE * Hours_Per_Year * Electricity_$/kWh
 
-# Example: 8x H100 cluster
-# Hardware: $250,000 (server + GPUs + networking)
-# Depreciation: $250,000 / 4 years = $62,500/year
-# Power: 8 * 0.7 kW * 1.3 PUE * 8760 hrs * $0.10/kWh = $6,377/year
-# Staff: $200,000/year (partial FTE for 1 admin)
-# Effective hourly rate: ($62,500 + $6,377 + $50,000) / (8 GPUs * 8760 hrs) = $1.70/GPU-hr
-# Compare to: H100 on-demand at $6-8/hr, spot at $2.50/hr
+# Example: 8x H100 cluster (all figures annual)
+# Hardware:      $250,000 (server + GPUs + networking)
+# Depreciation:  $250,000 / 4 years                        = $62,500/yr
+# Power:         8 * 0.7 kW * 1.3 PUE * 8760 h * $0.10/kWh = $6,377/yr
+# Staff:         0.25 FTE admin at a $200,000 loaded cost   = $50,000/yr
+# Colo/space + network + support (assume)                   = $15,000/yr
+# ---------------------------------------------------------------------
+# Annual TCO = 62,500 + 6,377 + 50,000 + 15,000            = $133,877/yr
+#
+# Effective rate at 100% utilization:
+#   $133,877 / (8 GPUs * 8760 h) = $1.91/GPU-hr
+# Effective rate at a realistic 60% utilization:
+#   $133,877 / (8 * 8760 * 0.60) = $3.18/GPU-hr
+#
+# Compare to AWS H100 on-demand at ~$12.29/GPU-hr, or ~$4-6/GPU-hr on a
+# 1-3 year commitment / neocloud reserved contract.
+#
+# The conclusion is sensitive to two inputs, so vary them before deciding:
+#   - Utilization. Below roughly 25-30% sustained utilization, on-demand cloud
+#     wins outright because you stop paying between jobs.
+#   - Staff allocation. Charging a full FTE ($200k) instead of 0.25 FTE raises
+#     annual TCO to $283,877 and the 60%-utilization rate to $6.75/GPU-hr,
+#     which is competitive with committed cloud rather than 4x cheaper.
 ```
 
 ---
@@ -276,7 +319,7 @@ Power_Cost = Num_GPUs * TDP_kW * PUE * Hours_Per_Year * Electricity_$/kWh
 
 ### Phase 5: Model Optimization (Pre-Deployment)
 
-- [ ] Apply dynamic quantization (INT8) as baseline -- free accuracy, smaller model
+- [ ] Apply dynamic quantization (INT8) as baseline -- cheapest to apply (no calibration/retraining); measure the 0.1-1% accuracy cost on your own eval set
 - [ ] Benchmark quantized model -- measure latency, throughput, accuracy
 - [ ] Evaluate static quantization if dynamic is insufficient
 - [ ] Consider structured pruning (20-40%) for additional size reduction
@@ -356,7 +399,7 @@ Power_Cost = Num_GPUs * TDP_kW * PUE * Hours_Per_Year * Electricity_$/kWh
 |---------|-----|-----|-------|
 | Spot termination notice | 2 min | 30 sec | 30 sec |
 | Auto-scaling for ML | SageMaker auto-scaling | Vertex AI auto-scaling | Azure ML auto-scaling |
-| Scale-to-zero inference | SageMaker Serverless | Cloud Run (GPU preview) | Container Apps |
+| Scale-to-zero inference | SageMaker Serverless (CPU only) | Cloud Run with NVIDIA L4 GPUs (GA since 2025) | Container Apps serverless GPU |
 | GPU sharing / MIG | P5 MIG, SageMaker multi-model | A100 MIG on GKE | AKS with MIG |
 | Spot training support | SageMaker managed spot | Vertex AI preemptible | Azure ML low-priority |
 | Cost anomaly detection | AWS Cost Anomaly Detection | GCP Budget alerts | Azure Cost Alerts |

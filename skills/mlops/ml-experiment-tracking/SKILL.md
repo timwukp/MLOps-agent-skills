@@ -65,8 +65,8 @@ with mlflow.start_run(run_name="baseline-v1") as run:
     mlflow.log_artifact("confusion_matrix.png")
     mlflow.log_artifact("feature_importance.csv")
 
-    # Log model
-    mlflow.sklearn.log_model(model, "model")
+    # Log model (MLflow 3: use name= instead of positional artifact_path)
+    mlflow.sklearn.log_model(model, name="model")
 
     # Set tags
     mlflow.set_tag("team", "recommendation")
@@ -93,8 +93,9 @@ mlflow.xgboost.autolog()
 # LightGBM
 mlflow.lightgbm.autolog()
 
-# HuggingFace Transformers (MLflow >= 2.6)
-mlflow.transformers.autolog()
+# HuggingFace Transformers: there is no mlflow.transformers.autolog().
+# Use mlflow.autolog() or the transformers MLflowCallback with the Trainer.
+mlflow.autolog()
 ```
 
 ### 2. Weights & Biases
@@ -212,8 +213,8 @@ mlflow server \
 
 # Docker deployment
 docker run -p 5000:5000 \
-    -e BACKEND_STORE_URI=postgresql://user:pass@host/mlflow \
-    -e DEFAULT_ARTIFACT_ROOT=s3://mlflow-artifacts/ \
+    -e MLFLOW_BACKEND_STORE_URI=postgresql://user:pass@host/mlflow \
+    -e MLFLOW_DEFAULT_ARTIFACT_ROOT=s3://mlflow-artifacts/ \
     ghcr.io/mlflow/mlflow:latest \
     mlflow server --host 0.0.0.0
 ```

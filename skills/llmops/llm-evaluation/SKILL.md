@@ -90,9 +90,12 @@ def compute_perplexity(texts, model_name="gpt2"):
 ### 2. LLM-as-Judge
 
 ```python
-import openai
+import json
+from openai import OpenAI
 
-def llm_judge(question, answer, reference_answer=None, model="gpt-4o"):
+client = OpenAI()
+
+def llm_judge(question, answer, reference_answer=None, model="gpt-5"):
     """Use an LLM to evaluate answer quality."""
     prompt = f"""Evaluate the following answer on a scale of 1-5 for each criterion.
 
@@ -110,7 +113,7 @@ Rate on these criteria:
 Respond in JSON format:
 {{"relevance": N, "accuracy": N, "completeness": N, "coherence": N, "helpfulness": N, "reasoning": "..."}}"""
 
-    response = openai.chat.completions.create(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
@@ -118,7 +121,7 @@ Respond in JSON format:
     return json.loads(response.choices[0].message.content)
 
 # Pairwise comparison
-def llm_pairwise_judge(question, answer_a, answer_b, model="gpt-4o"):
+def llm_pairwise_judge(question, answer_a, answer_b, model="gpt-5"):
     """Compare two answers and pick the better one."""
     prompt = f"""Compare these two answers and determine which is better.
 
@@ -129,7 +132,7 @@ Answer B: {answer_b}
 Which answer is better? Respond with JSON:
 {{"winner": "A" or "B" or "tie", "reasoning": "..."}}"""
 
-    response = openai.chat.completions.create(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
@@ -140,31 +143,36 @@ Which answer is better? Respond with JSON:
 ### 3. RAG Evaluation with RAGAS
 
 ```python
-from ragas import evaluate
+# RAGAS 0.2+ API: class-based metrics, EvaluationDataset, explicit judge LLM
+from ragas import evaluate, EvaluationDataset
 from ragas.metrics import (
-    faithfulness, answer_relevancy, context_precision,
-    context_recall, answer_correctness
+    Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
 )
-from datasets import Dataset
+from ragas.llms import LangchainLLMWrapper
+from langchain_openai import ChatOpenAI
 
-# Prepare evaluation dataset
-eval_data = Dataset.from_dict({
-    "question": ["What is MLOps?"],
-    "answer": ["MLOps is the practice of..."],
-    "contexts": [["MLOps combines ML and DevOps..."]],
-    "ground_truth": ["MLOps is a set of practices..."],
-})
+# Prepare evaluation dataset (user_input/response/retrieved_contexts/reference)
+eval_data = EvaluationDataset.from_list([
+    {
+        "user_input": "What is MLOps?",
+        "response": "MLOps is the practice of...",
+        "retrieved_contexts": ["MLOps combines ML and DevOps..."],
+        "reference": "MLOps is a set of practices...",
+    },
+])
+
+judge_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-5-mini"))
 
 # Run evaluation
 results = evaluate(
     eval_data,
     metrics=[
-        faithfulness,         # Is the answer grounded in context?
-        answer_relevancy,     # Is the answer relevant to the question?
-        context_precision,    # Are retrieved contexts relevant?
-        context_recall,       # Does context cover ground truth?
-        answer_correctness,   # Is the answer factually correct?
+        Faithfulness(),       # Is the answer grounded in context?
+        AnswerRelevancy(),    # Is the answer relevant to the question?
+        ContextPrecision(),   # Are retrieved contexts relevant?
+        ContextRecall(),      # Does context cover the reference?
     ],
+    llm=judge_llm,
 )
 print(results)
 ```

@@ -51,14 +51,15 @@ Need to customize an LLM?
 ### 1. LoRA Fine-Tuning with PEFT
 
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 
-# Load base model
-model_name = "meta-llama/Llama-3.1-8B"
+# Load base model (e.g. Qwen3, Llama 4)
+model_name = "Qwen/Qwen3-8B"
 model = AutoModelForCausalLM.from_pretrained(
-    model_name, torch_dtype=torch.bfloat16, device_map="auto"
+    model_name, dtype=torch.bfloat16, device_map="auto"  # dtype= (torch_dtype deprecated in transformers>=4.56)
 )
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 tokenizer.pad_token = tokenizer.eos_token
@@ -78,9 +79,10 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 # Trainable: 0.5% of total parameters
 
-# Training
-training_args = TrainingArguments(
+# Training (SFTConfig carries SFT-specific args like max_length)
+training_args = SFTConfig(
     output_dir="./lora-output",
+    max_length=2048,
     num_train_epochs=3,
     per_device_train_batch_size=4,
     gradient_accumulation_steps=4,
@@ -102,7 +104,6 @@ trainer = SFTTrainer(
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
     processing_class=tokenizer,
-    max_seq_length=2048,
 )
 
 trainer.train()
@@ -113,6 +114,7 @@ trainer.save_model("./lora-adapter")
 
 ```python
 from transformers import BitsAndBytesConfig
+from peft import prepare_model_for_kbit_training
 
 # 4-bit quantization config
 bnb_config = BitsAndBytesConfig(
@@ -127,6 +129,9 @@ model = AutoModelForCausalLM.from_pretrained(
     quantization_config=bnb_config,
     device_map="auto",
 )
+
+# Prepare quantized model for training (casts norms, enables grad checkpointing hooks)
+model = prepare_model_for_kbit_training(model)
 
 # Apply LoRA on quantized model
 model = get_peft_model(model, lora_config)
@@ -194,7 +199,7 @@ dpo_trainer.train()
 from peft import PeftModel
 
 # Load base + adapter
-base_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
+base_model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16)
 model = PeftModel.from_pretrained(base_model, "./lora-adapter")
 
 # Merge adapter into base model
@@ -204,13 +209,16 @@ merged_model = model.merge_and_unload()
 merged_model.save_pretrained("./merged-model")
 tokenizer.save_pretrained("./merged-model")
 
-# Convert to GGUF for llama.cpp (optional)
-# python convert_hf_to_gguf.py ./merged-model --outtype q4_k_m
+# Convert to GGUF for llama.cpp (optional, two steps: convert then quantize)
+# python convert_hf_to_gguf.py ./merged-model --outtype f16 --outfile model-f16.gguf
+# llama-quantize model-f16.gguf model-Q4_K_M.gguf Q4_K_M
 ```
 
 ### 6. Training Data Quality
 
 ```python
+import numpy as np
+
 def validate_training_data(dataset):
     """Check fine-tuning dataset quality."""
     issues = []

@@ -52,7 +52,7 @@ def _get_client(model):
     return OpenAI()
 
 
-def _call_llm(client, prompt, model="gpt-4o-mini", temperature=0.9):
+def _call_llm(client, prompt, model="gpt-5-mini", temperature=0.9):
     """Call the LLM and parse JSON response."""
     try:
         resp = client.chat.completions.create(
@@ -65,19 +65,48 @@ def _call_llm(client, prompt, model="gpt-4o-mini", temperature=0.9):
         return None
 
 
+# Cap on consecutive fruitless LLM calls before giving up, so a failing endpoint
+# or a model that ignores the schema cannot spin forever.
+MAX_EMPTY_ATTEMPTS = 5
+
+
+def _extract_pairs(data):
+    """Pull the pair list out of an LLM response, tolerating key variations."""
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("pairs") or data.get("data") or []
+    if not isinstance(raw, list):
+        return []
+    # Keep only well-formed pairs; a malformed batch must not count as progress.
+    return [p for p in raw
+            if isinstance(p, dict) and p.get("instruction") and p.get("response")]
+
+
 def generate_self_instruct(seed_examples, num_samples, model, client):
     """Self-instruct: bootstrap new instruction-response pairs from seeds."""
     results, batch = [], min(10, num_samples)
-    seed_texts = [ex["instruction"] for ex in seed_examples]
-    while len(results) < num_samples:
+    seed_texts = [ex["instruction"] for ex in seed_examples if ex.get("instruction")]
+    if not seed_texts:
+        logger.error("No seed examples contain an 'instruction' field.")
+        return []
+    empty_attempts = 0
+    while len(results) < num_samples and empty_attempts < MAX_EMPTY_ATTEMPTS:
         sampled = random.sample(seed_texts, min(5, len(seed_texts)))
         data = _call_llm(client, SELF_INSTRUCT_PROMPT.format(
             n=batch, seeds="\n".join(f"- {s}" for s in sampled)), model=model)
-        if data:
-            pairs = data.get("pairs", data.get("data", []))
-            results.extend(pairs)
-            seed_texts.extend(p["instruction"] for p in pairs if p.get("instruction"))
-            logger.info(f"Generated {len(results)}/{num_samples}")
+        pairs = _extract_pairs(data)
+        if not pairs:
+            empty_attempts += 1
+            logger.warning(f"No usable pairs returned "
+                           f"({empty_attempts}/{MAX_EMPTY_ATTEMPTS} attempts)")
+            continue
+        empty_attempts = 0
+        results.extend(pairs)
+        seed_texts.extend(p["instruction"] for p in pairs)
+        logger.info(f"Generated {len(results)}/{num_samples}")
+    if len(results) < num_samples:
+        logger.warning(f"Stopped after {MAX_EMPTY_ATTEMPTS} unproductive attempts "
+                       f"with {len(results)}/{num_samples} samples")
     return results[:num_samples]
 
 
@@ -85,18 +114,25 @@ def generate_topic_based(topics, num_samples, model, client):
     """Generate instruction-response pairs per topic."""
     results, per_topic = [], max(1, num_samples // len(topics))
     for topic in topics:
-        remaining = per_topic
-        while remaining > 0:
+        topic = topic.strip()
+        remaining, empty_attempts = per_topic, 0
+        while remaining > 0 and empty_attempts < MAX_EMPTY_ATTEMPTS:
             n = min(10, remaining)
-            data = _call_llm(client, TOPIC_PROMPT.format(n=n, topic=topic.strip()), model=model)
-            if data:
-                pairs = data.get("pairs", data.get("data", []))
-                for p in pairs:
-                    p["topic"] = topic.strip()
-                results.extend(pairs)
-                remaining -= len(pairs)
-            else:
+            data = _call_llm(client, TOPIC_PROMPT.format(n=n, topic=topic), model=model)
+            pairs = _extract_pairs(data)
+            if not pairs:
+                # Always decrement so a model that returns nothing (or the wrong
+                # keys) still terminates the loop.
+                empty_attempts += 1
                 remaining -= n
+                logger.warning(f"[{topic}] No usable pairs "
+                               f"({empty_attempts}/{MAX_EMPTY_ATTEMPTS} attempts)")
+                continue
+            empty_attempts = 0
+            for p in pairs:
+                p["topic"] = topic
+            results.extend(pairs)
+            remaining -= len(pairs)
     return results[:num_samples]
 
 
@@ -133,6 +169,18 @@ def _jaccard(a, b):
     return sum(x == y for x, y in zip(a, b)) / len(a)
 
 
+def _banded_buckets(sig, bands=16):
+    """LSH band keys for a signature.
+
+    Plain MinHash comparison is O(n^2) in the number of records: every new
+    signature is compared against every kept one. Banding turns that into an
+    O(n) candidate lookup - two signatures only get compared if they agree on a
+    whole band, which is exactly the LSH property that makes MinHash scale.
+    """
+    rows = max(1, len(sig) // bands)
+    return [(b, tuple(sig[b * rows:(b + 1) * rows])) for b in range(bands)]
+
+
 def filter_quality(examples, min_instr_len=5, min_resp_len=20, dedup_threshold=0.8):
     """Apply length filter, exact dedup, near-dup removal (MinHash), and diversity scoring."""
     logger.info(f"Filtering {len(examples)} examples ...")
@@ -148,12 +196,21 @@ def filter_quality(examples, min_instr_len=5, min_resp_len=20, dedup_threshold=0
         if key not in seen:
             seen.add(key); deduped.append(ex)
     logger.info(f"After exact dedup: {len(deduped)}")
-    # Near-dup removal
-    sigs, unique = [], []
+    # Near-dup removal via MinHash + LSH banding (candidates only, not all pairs)
+    buckets, kept_sigs, unique = {}, [], []
     for ex in deduped:
         sig = _minhash_sig(ex["instruction"] + " " + ex.get("response", ""))
-        if not any(_jaccard(sig, ps) >= dedup_threshold for ps in sigs):
-            sigs.append(sig); unique.append(ex)
+        bands = _banded_buckets(sig)
+        candidates = set()
+        for band_key in bands:
+            candidates.update(buckets.get(band_key, ()))
+        if any(_jaccard(sig, kept_sigs[i]) >= dedup_threshold for i in candidates):
+            continue
+        idx = len(kept_sigs)
+        kept_sigs.append(sig)
+        unique.append(ex)
+        for band_key in bands:
+            buckets.setdefault(band_key, []).append(idx)
     logger.info(f"After near-dup removal: {len(unique)}")
     # Diversity score
     trigrams = set()
@@ -204,7 +261,7 @@ def main():
                    help="generate: self-instruct/topic; evolve: evol-instruct; filter: quality filter")
     p.add_argument("--seed-data", help="Path to seed JSONL file")
     p.add_argument("--topics", help="Comma-separated topics for topic-based generation")
-    p.add_argument("--model", default="gpt-4o-mini", help="LLM model name (OpenAI-compatible)")
+    p.add_argument("--model", default="gpt-5-mini", help="LLM model name (OpenAI-compatible)")
     p.add_argument("--num-samples", type=int, default=50, help="Number of samples to generate")
     p.add_argument("--output", default="synthetic_data.jsonl", help="Output JSONL path")
     p.add_argument("--format", dest="fmt", choices=["alpaca","sharegpt","chat"], default="chat")

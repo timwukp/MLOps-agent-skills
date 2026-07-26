@@ -108,13 +108,13 @@ for token in response:
 ### 3. Ollama (Local Development)
 
 ```bash
-# Install and run
-ollama pull llama3.1:8b
-ollama serve
+# Start the server first (the desktop app does this automatically), then pull
+ollama serve &
+ollama pull qwen3:8b
 
 # API usage
 curl http://localhost:11434/api/chat -d '{
-    "model": "llama3.1:8b",
+    "model": "qwen3:8b",
     "messages": [{"role": "user", "content": "What is MLOps?"}],
     "stream": false
 }'
@@ -125,7 +125,7 @@ curl http://localhost:11434/api/chat -d '{
 import ollama
 
 response = ollama.chat(
-    model="llama3.1:8b",
+    model="qwen3:8b",
     messages=[{"role": "user", "content": "What is MLOps?"}],
 )
 print(response["message"]["content"])
@@ -134,18 +134,17 @@ print(response["message"]["content"])
 ### 4. Quantization for Deployment
 
 ```python
-# AWQ quantization (recommended for vLLM)
-from awq import AutoAWQForCausalLM
+# Weight quantization with llm-compressor (AutoAWQ is deprecated; vLLM's supported path)
+# pip install llmcompressor
+from llmcompressor import oneshot
+from llmcompressor.modifiers.quantization import QuantizationModifier
 
-model = AutoAWQForCausalLM.from_pretrained(model_path)
-tokenizer = AutoTokenizer.from_pretrained(model_path)
+recipe = QuantizationModifier(targets="Linear", scheme="W4A16", ignore=["lm_head"])
+oneshot(model=model_path, recipe=recipe, output_dir="model-w4a16")
 
-quant_config = {"zero_point": True, "q_group_size": 128, "w_bit": 4}
-model.quantize(tokenizer, quant_config=quant_config)
-model.save_quantized("model-awq")
-
-# GGUF for llama.cpp / Ollama
-# python convert_hf_to_gguf.py model_path --outtype q4_k_m --outfile model.gguf
+# GGUF for llama.cpp / Ollama (two steps: convert to f16, then quantize)
+# python convert_hf_to_gguf.py model_path --outtype f16 --outfile model-f16.gguf
+# llama-quantize model-f16.gguf model-Q4_K_M.gguf Q4_K_M
 ```
 
 **Quantization Comparison:**
@@ -163,16 +162,14 @@ model.save_quantized("model-awq")
 
 ```dockerfile
 # Dockerfile for vLLM
+# The base image's ENTRYPOINT already launches the OpenAI API server;
+# CMD supplies its arguments. Note: exec-form CMD does NOT expand env vars,
+# so values are inlined here rather than referenced via ${...}.
 FROM vllm/vllm-openai:latest
 
-ENV MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct
-ENV TENSOR_PARALLEL_SIZE=1
-ENV MAX_MODEL_LEN=4096
-
-CMD ["python", "-m", "vllm.entrypoints.openai.api_server", \
-     "--model", "${MODEL_NAME}", \
-     "--tensor-parallel-size", "${TENSOR_PARALLEL_SIZE}", \
-     "--max-model-len", "${MAX_MODEL_LEN}", \
+CMD ["--model", "meta-llama/Llama-3.1-8B-Instruct", \
+     "--tensor-parallel-size", "1", \
+     "--max-model-len", "4096", \
      "--port", "8000"]
 ```
 
@@ -248,13 +245,13 @@ async def chat_stream(request: ChatRequest):
 | CPU support | Limited | No | Yes | Excellent |
 | Quantization | AWQ, GPTQ | AWQ, GPTQ, BnB | GGUF | GGUF |
 | OpenAI compat | Yes | Partial | Yes | Yes |
-| Multi-GPU | Yes | Yes | No | Limited |
+| Multi-GPU | Yes | Yes | Yes (layer split) | Yes (layer split) |
 | Production ready | Yes | Yes | Dev/small | Dev/edge |
 
 ## Best Practices
 
 1. **Use vLLM** for production GPU serving (PagedAttention, continuous batching)
-2. **Quantize to AWQ 4-bit** for best quality/speed tradeoff
+2. **Quantize appropriately** - FP8 on H100-class GPUs, 4-bit (AWQ/GPTQ) when memory-bound on older hardware
 3. **Set appropriate max_model_len** - Don't over-allocate KV cache
 4. **Use streaming** for better user experience
 5. **Monitor GPU utilization** and batch sizes

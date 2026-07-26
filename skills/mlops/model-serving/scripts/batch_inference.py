@@ -199,11 +199,25 @@ def run(args):
     df = load_dataframe(str(input_path))
     logger.info("Loaded %d rows x %d cols", len(df), len(df.columns))
 
+    # Select the feature matrix explicitly; by default ALL input columns are
+    # fed to the model, which breaks if the file carries ids/labels/metadata.
+    feature_df = df
+    if args.feature_columns:
+        missing = [c for c in args.feature_columns if c not in df.columns]
+        if missing:
+            logger.error("Feature columns not in input: %s", missing)
+            sys.exit(1)
+        feature_df = df[args.feature_columns]
+    elif args.drop_columns:
+        feature_df = df.drop(columns=args.drop_columns, errors="ignore")
+    if feature_df is not df:
+        logger.info("Using %d feature column(s): %s", len(feature_df.columns), list(feature_df.columns))
+
     model = load_model(str(model_path), args.framework)
 
     logger.info("Running inference (batch_size=%d, probs=%s)", args.batch_size, args.include_probabilities)
     preds, probs, latencies, failed = run_batch_inference(
-        df, model, args.framework, args.batch_size, args.include_probabilities,
+        feature_df, model, args.framework, args.batch_size, args.include_probabilities,
     )
 
     import pandas as pd
@@ -234,6 +248,14 @@ def parse_args(argv=None):
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size (default 256)")
     parser.add_argument("--output", default=None, help="Output path (default: <input>_predictions.<ext>)")
+    parser.add_argument(
+        "--feature-columns", nargs="*", default=None,
+        help="Columns to feed the model (default: all columns)",
+    )
+    parser.add_argument(
+        "--drop-columns", nargs="*", default=None,
+        help="Columns to exclude from the feature matrix (e.g. id, label)",
+    )
     parser.add_argument(
         "--include-probabilities",
         action="store_true",

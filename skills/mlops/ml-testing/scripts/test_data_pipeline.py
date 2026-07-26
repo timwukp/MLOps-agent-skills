@@ -64,6 +64,53 @@ def load_schema(path: str) -> Dict[str, Any]:
 # Schema validation
 # ---------------------------------------------------------------------------
 
+# Kind-level families, for schemas that intentionally accept any width/signedness.
+# Values are pandas/numpy dtype "kind" characters.
+_DTYPE_FAMILIES = {
+    "integer": set("iu"),
+    "signed_integer": set("i"),
+    "unsigned_integer": set("u"),
+    "float": set("f"),
+    "numeric": set("iuf"),
+    "bool": set("b"),
+    "string": set("OSU"),
+    "object": set("O"),
+    "datetime": set("M"),
+    "timedelta": set("m"),
+}
+
+
+def _dtype_matches(actual_dtype, expected: str):
+    """
+    Compare a pandas dtype against a schema expectation.
+
+    Returns (passed, detail). `expected` may be:
+      - an exact dtype string ("int64", "float32", "string", "datetime64[ns]"),
+        compared via pandas.api.types.pandas_dtype for exact equality; or
+      - a family name from _DTYPE_FAMILIES ("integer", "numeric", ...), compared
+        on dtype kind so any width matches.
+    """
+    import pandas as pd
+
+    key = expected.strip().lower()
+    if key in _DTYPE_FAMILIES:
+        kinds = _DTYPE_FAMILIES[key]
+        kind = getattr(actual_dtype, "kind", None)
+        if kind is None:  # extension dtypes expose numpy_dtype instead
+            kind = getattr(getattr(actual_dtype, "numpy_dtype", None), "kind", "")
+        passed = kind in kinds
+        return passed, (f"expected family={expected} (kinds={sorted(kinds)}), "
+                        f"actual={actual_dtype} (kind={kind})")
+
+    try:
+        expected_dtype = pd.api.types.pandas_dtype(expected)
+    except TypeError:
+        return False, f"expected={expected} is not a recognized dtype or family"
+
+    passed = actual_dtype == expected_dtype
+    return passed, f"expected={expected_dtype}, actual={actual_dtype}"
+
+
 def validate_schema(df, schema: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Check column presence, types, and nullable constraints."""
     checks: List[Dict[str, Any]] = []
@@ -87,13 +134,18 @@ def validate_schema(df, schema: Dict[str, Any]) -> List[Dict[str, Any]]:
         if col not in df.columns:
             continue
 
-        # Type check
+        # Type check.
+        # Substring matching is wrong: "int" matches "uint8", "int" matches
+        # "interval", and "float" matches nothing useful for Float64 extension
+        # dtypes. Resolve both sides through pandas_dtype and compare exactly,
+        # with an explicit opt-in for kind-level families ("integer", "float",
+        # "numeric", "string", "datetime", "bool").
         expected_dtype = col_spec.get("dtype")
         if expected_dtype:
-            actual_dtype = str(df[col].dtype)
-            type_ok = expected_dtype in actual_dtype or actual_dtype.startswith(expected_dtype)
+            actual_dtype = df[col].dtype
+            type_ok, detail = _dtype_matches(actual_dtype, expected_dtype)
             checks.append({"check": "schema.dtype", "column": col, "pass": type_ok,
-                            "detail": f"expected={expected_dtype}, actual={actual_dtype}"})
+                            "detail": detail})
 
         # Nullable
         if not col_spec.get("nullable", True):
@@ -174,23 +226,67 @@ def quality_checks(df, schema: Dict[str, Any]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def distribution_tests(df, ref_df, schema: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """KS test per numeric feature comparing *df* against *ref_df*."""
+    """
+    Compare *df* against *ref_df* per numeric feature.
+
+    Gating on the KS p-value does not work at scale. The KS test's power grows
+    with sample size, so at n in the hundreds of thousands ANY difference —
+    including a practically irrelevant 0.1% mean shift — drives p below alpha and
+    the check fails on every run. Effect size is the stable gate.
+
+    Default: threshold the KS *statistic* (the max CDF gap, which is
+    sample-size-independent). Configure via schema:
+
+        distribution:
+          ks_statistic_max: 0.1     # effect-size gate (default)
+          ks_alpha: 0.05            # only used when mode is "pvalue"
+          mode: statistic | pvalue  # default: statistic
+          max_sample: 50000         # subsample both sides before testing
+
+    A KS statistic under ~0.1 is normally noise; 0.1-0.2 warrants a look; above
+    0.2 is a real shift.
+    """
     import numpy as np
     from scipy.stats import ks_2samp
 
     checks: List[Dict[str, Any]] = []
-    alpha = schema.get("distribution", {}).get("ks_alpha", 0.05)
+    dist_cfg = schema.get("distribution", {})
+    alpha = dist_cfg.get("ks_alpha", 0.05)
+    stat_max = dist_cfg.get("ks_statistic_max", 0.1)
+    mode = dist_cfg.get("mode", "statistic")
+    max_sample = dist_cfg.get("max_sample", 50_000)
+    rng = np.random.default_rng(dist_cfg.get("seed", 0))
     numeric_cols = df.select_dtypes(include=[np.number]).columns
+
+    def _subsample(values):
+        if max_sample and len(values) > max_sample:
+            return values[rng.choice(len(values), size=max_sample, replace=False)]
+        return values
 
     for col in numeric_cols:
         if col not in ref_df.columns:
             continue
-        stat, pvalue = ks_2samp(df[col].dropna(), ref_df[col].dropna())
-        passed = pvalue >= alpha
+        cur = _subsample(df[col].dropna().to_numpy())
+        ref = _subsample(ref_df[col].dropna().to_numpy())
+        if len(cur) == 0 or len(ref) == 0:
+            checks.append({
+                "check": "distribution.ks_test", "column": col, "pass": True,
+                "detail": "skipped: no non-null values on one side",
+            })
+            continue
+        stat, pvalue = ks_2samp(cur, ref)
+        if mode == "pvalue":
+            passed = pvalue >= alpha
+            detail = (f"statistic={stat:.4f}, p-value={pvalue:.4f}, alpha={alpha} "
+                      f"[p-value mode: expect false alarms at large n]")
+        else:
+            passed = stat <= stat_max
+            detail = (f"statistic={stat:.4f} (max={stat_max}), p-value={pvalue:.4f}, "
+                      f"n_cur={len(cur)}, n_ref={len(ref)}")
         checks.append({
             "check": "distribution.ks_test", "column": col,
-            "pass": passed,
-            "detail": f"statistic={stat:.4f}, p-value={pvalue:.4f}, alpha={alpha}",
+            "pass": bool(passed),
+            "detail": detail,
         })
 
     # Categorical distribution: compare value proportions

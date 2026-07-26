@@ -34,34 +34,37 @@ detecting degradation before it impacts business outcomes.
 ### 1. Evidently AI Monitoring
 
 ```python
-from evidently.report import Report
-from evidently.metric_preset import (
-    DataDriftPreset, DataQualityPreset, TargetDriftPreset,
-    ClassificationPreset, RegressionPreset
+# Evidently 0.7+ API (evidently.report / metric_preset / test_suite are removed)
+from evidently import Report, Dataset, DataDefinition
+from evidently.presets import (
+    DataDriftPreset, DataSummaryPreset, ClassificationPreset, RegressionPreset
 )
-from evidently.test_suite import TestSuite
-from evidently.tests import *
 
-# Data Drift Report
-drift_report = Report(metrics=[DataDriftPreset()])
-drift_report.run(reference_data=reference_df, current_data=production_df)
-drift_report.save_html("drift_report.html")
-drift_report_dict = drift_report.as_dict()
+# Wrap dataframes with a data definition (replaces ColumnMapping)
+definition = DataDefinition(
+    numerical_columns=["feature_1", "feature_2"],
+    categorical_columns=["segment"],
+)
+reference = Dataset.from_pandas(reference_df, data_definition=definition)
+production = Dataset.from_pandas(production_df, data_definition=definition)
+
+# Data Drift Report; run() returns a snapshot
+drift_report = Report([DataDriftPreset()])
+snapshot = drift_report.run(production, reference)
+snapshot.save_html("drift_report.html")
+drift_report_dict = snapshot.dict()
 
 # Classification Performance Report
-perf_report = Report(metrics=[ClassificationPreset()])
-perf_report.run(reference_data=reference_df, current_data=production_df)
+perf_report = Report([ClassificationPreset()])
+perf_snapshot = perf_report.run(production, reference)
 
-# Test Suite (pass/fail checks)
-test_suite = TestSuite(tests=[
-    TestNumberOfDriftedColumns(lt=3),
-    TestShareOfDriftedColumns(lt=0.3),
-    TestColumnDrift("prediction"),
-    TestAccuracyScore(gt=0.85),
-    TestF1Score(gt=0.80),
-])
-test_suite.run(reference_data=reference_df, current_data=production_df)
-results = test_suite.as_dict()
+# Pass/fail checks: TestSuite is merged into Report via include_tests=True
+checked_report = Report(
+    [DataDriftPreset(), ClassificationPreset()],
+    include_tests=True,
+)
+checked_snapshot = checked_report.run(production, reference)
+results = checked_snapshot.dict()
 ```
 
 ### 2. Whylogs Profiling
@@ -87,13 +90,17 @@ builder.add_constraint(greater_than_number(column_name="score", number=0.0))
 builder.add_constraint(is_in_range(column_name="age", lower=0, upper=150))
 
 constraints = builder.build()
+# generate_constraints_report() returns a list of per-constraint results
 report = constraints.generate_constraints_report()
-print(f"Passed: {report.passed}, Failed: {report.failed}")
+passed = sum(r.passed for r in report)
+failed = sum(r.failed for r in report)
+print(f"Passed: {passed}, Failed: {failed}")
 ```
 
 ### 3. Performance Monitoring
 
 ```python
+from datetime import datetime, timezone
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
     roc_auc_score, mean_squared_error, mean_absolute_error
@@ -128,7 +135,7 @@ class ModelPerformanceMonitor:
                     "severity": "critical" if value < self.thresholds[metric] * 0.9 else "warning",
                 })
 
-        self.history.append({"timestamp": datetime.utcnow(), **metrics})
+        self.history.append({"timestamp": datetime.now(timezone.utc), **metrics})
         return metrics, violations
 ```
 
@@ -152,7 +159,10 @@ PREDICTION_LATENCY = Histogram(
 PREDICTION_VALUE = Histogram(
     "model_prediction_value",
     "Distribution of prediction values",
-    ["model_name"]
+    ["model_name"],
+    # Default buckets are tuned for latencies (0.005-10s); set explicit
+    # buckets that match your prediction range (e.g. probabilities 0-1)
+    buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 )
 MODEL_ACCURACY = Gauge(
     "model_accuracy",
@@ -170,37 +180,41 @@ def track_prediction(model_name, version, prediction, latency, success=True):
 ### 5. Alerting Configuration
 
 ```yaml
-# alerts/model_alerts.yaml
-alerts:
+# alerts/model_alerts.yaml (schema consumed by scripts/setup_alerts.py)
+rules:
   - name: model_accuracy_degraded
     metric: model_accuracy
-    condition: "< 0.85"
+    condition: lt
+    threshold: 0.85
     severity: warning
-    window: 1h
+    cooldown_minutes: 60
     channels: [slack, email]
     message: "Model accuracy dropped below 85%"
 
   - name: model_accuracy_critical
     metric: model_accuracy
-    condition: "< 0.75"
+    condition: lt
+    threshold: 0.75
     severity: critical
-    window: 30m
-    channels: [slack, pagerduty]
+    cooldown_minutes: 30
+    channels: [slack, webhook]
     message: "CRITICAL: Model accuracy below 75%"
 
   - name: high_latency
     metric: model_prediction_latency_p99
-    condition: "> 0.5"
+    condition: gt
+    threshold: 0.5
     severity: warning
-    window: 15m
+    cooldown_minutes: 15
     channels: [slack]
     message: "P99 latency exceeds 500ms"
 
   - name: prediction_volume_drop
     metric: model_predictions_total_rate
-    condition: "< 100"
+    condition: lt
+    threshold: 100
     severity: warning
-    window: 30m
+    cooldown_minutes: 30
     channels: [slack]
     message: "Prediction volume dropped significantly"
 ```

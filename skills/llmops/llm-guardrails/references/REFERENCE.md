@@ -84,7 +84,7 @@ from guardrails.hub import DetectPII, NSFWText, ProvenanceV1
 guard = Guard().use_many(
     ProvenanceV1(
         threshold=0.7,
-        llm_callable="gpt-4o-mini",
+        llm_callable="gpt-5-mini",
         on_fail="fix"
     )
 )
@@ -113,9 +113,9 @@ class ExtractionResult(BaseModel):
     summary: str = Field(max_length=500)
 
 guard = Guard.from_pydantic(ExtractionResult)
+# Guardrails >=0.5: pass a model string, not an llm_api callable.
 result = guard(
-    llm_api=openai.chat.completions.create,
-    model="gpt-4o",
+    model="gpt-5-mini",
     messages=[{"role": "user", "content": prompt}]
 )
 ```
@@ -152,7 +152,7 @@ sanitized_output, is_valid, score = scanner.scan(prompt, model_output)
 
 | API | Provider | Categories | Latency | Free Tier | Customizable |
 |---|---|---|---|---|---|
-| **Moderation API** | OpenAI | 11 categories (hate, violence, sexual, self-harm, etc.) | ~100ms | Free with API key | No |
+| **Moderation API** | OpenAI | 13 categories in `omni-moderation-latest` (hate, hate/threatening, harassment, harassment/threatening, self-harm + intent + instructions, sexual, sexual/minors, violence, violence/graphic, illicit, illicit/violent) | ~100ms | Free with API key | No |
 | **Perspective API** | Google/Jigsaw | Toxicity, threat, insult, profanity, identity attack | ~200ms | Free (QPS limits) | Limited |
 | **Content Safety** | Azure | Hate, violence, sexual, self-harm + severity levels | ~150ms | Pay-per-use | Yes (blocklists) |
 | **Comprehend** | AWS | Sentiment, PII, toxicity, targeted sentiment | ~300ms | Free tier available | Custom classifiers |
@@ -215,6 +215,13 @@ async def guarded_stream(prompt):
                 return
             yield buffer
             buffer = ""
+    # Flush the tail: the final chunk often has no terminal punctuation, and
+    # without this the last sentence is dropped (and never checked).
+    if buffer:
+        if not await quick_safety_check(buffer):
+            yield "[Content filtered]"
+            return
+        yield buffer
 ```
 
 Streaming considerations:
@@ -246,10 +253,14 @@ Streaming considerations:
 ```bash
 # Running Garak for automated LLM vulnerability scanning
 pip install garak
-garak --model_type openai --model_name gpt-4o \
-      --probes encoding,dan,knowledgegraph \
+garak --list_probes                      # confirm probe names before scanning
+garak --model_type openai --model_name gpt-5-mini \
+      --probes encoding,dan,promptinject \
       --report_prefix my_redteam_report
 ```
+
+Garak silently runs nothing if a probe name is wrong, so verify names with
+`--list_probes` rather than guessing.
 
 ## Compliance Requirements
 
@@ -276,7 +287,7 @@ garak --model_type openai --model_name gpt-4o \
   "risk_score": 0.95,
   "category": "prompt_injection",
   "input_hash": "sha256:...",
-  "model": "gpt-4o",
+  "model": "gpt-5-mini",
   "metadata": {
     "detector_version": "1.2.0",
     "threshold": 0.9

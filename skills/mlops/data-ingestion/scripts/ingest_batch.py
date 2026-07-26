@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -137,7 +137,12 @@ def compute_data_fingerprint(df):
 
 
 def incremental_load(df, watermark_col, watermark_file):
-    """Filter to only new records since last watermark."""
+    """Filter to only new records since last watermark.
+
+    Returns (df, new_watermark). The caller must persist the watermark
+    with save_watermark() only AFTER the data has been saved successfully,
+    otherwise a failed save would skip those records on the next run.
+    """
     import pandas as pd
 
     last_watermark = None
@@ -151,13 +156,15 @@ def incremental_load(df, watermark_col, watermark_file):
         df = df[df[watermark_col] > pd.to_datetime(last_watermark)]
         logger.info(f"Filtered to {len(df)} new records since {last_watermark}")
 
-    if len(df) > 0:
-        new_watermark = str(df[watermark_col].max())
-        with open(watermark_file, "w") as f:
-            f.write(new_watermark)
-        logger.info(f"Updated watermark to {new_watermark}")
+    new_watermark = str(df[watermark_col].max()) if len(df) > 0 else None
+    return df, new_watermark
 
-    return df
+
+def save_watermark(watermark_file, new_watermark):
+    """Persist the watermark after a successful save."""
+    with open(watermark_file, "w") as f:
+        f.write(new_watermark)
+    logger.info(f"Updated watermark to {new_watermark}")
 
 
 def main():
@@ -174,6 +181,8 @@ def main():
     parser.add_argument("--watermark-col", default=None, help="Column for incremental watermark")
     parser.add_argument("--watermark-file", default=".watermark", help="File to store watermark")
     parser.add_argument("--validate", action="store_true", help="Validate data before saving")
+    parser.add_argument("--strict", action="store_true",
+                        help="Fail the run (exit 1) if validation issues are found")
 
     args = parser.parse_args()
 
@@ -189,8 +198,9 @@ def main():
         logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns")
 
         # Incremental filtering
+        new_watermark = None
         if args.incremental and args.watermark_col:
-            df = incremental_load(df, args.watermark_col, args.watermark_file)
+            df, new_watermark = incremental_load(df, args.watermark_col, args.watermark_file)
             if len(df) == 0:
                 logger.info("No new data to ingest")
                 return
@@ -201,6 +211,9 @@ def main():
             if issues:
                 for issue in issues:
                     logger.warning(f"Validation issue: {issue}")
+                if args.strict:
+                    logger.error(f"Strict mode: {len(issues)} validation issue(s), aborting")
+                    sys.exit(1)
 
         # Compute fingerprint
         fingerprint = compute_data_fingerprint(df)
@@ -209,6 +222,10 @@ def main():
         # Save
         save_data(df, args.target, args.format, args.partition_cols, args.compression)
 
+        # Persist watermark only after the save succeeded
+        if new_watermark is not None:
+            save_watermark(args.watermark_file, new_watermark)
+
         # Summary
         summary = {
             "source": args.source,
@@ -216,7 +233,7 @@ def main():
             "rows": len(df),
             "columns": len(df.columns),
             "fingerprint": fingerprint,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         logger.info(f"Ingestion complete: {json.dumps(summary)}")
 

@@ -11,8 +11,8 @@ YAML config (transforms.yaml):
     numerical:
       columns: [age, income]
       scaler: standard            # standard | minmax | robust
-      log_transform: [income]     # apply log1p
-      power_transform: []         # yeo-johnson
+      log_transform: [income]     # apply log1p to these columns only
+      power_transform: []         # yeo-johnson, per-column list
     categorical:
       columns: [gender, city]
       encoder: onehot             # onehot | label | ordinal | frequency
@@ -29,6 +29,17 @@ import argparse, logging, sys
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def safe_log1p(X):
+    """log1p with negatives clipped to 0 (module-level so joblib can pickle it)."""
+    import numpy as np
+    return np.log1p(np.clip(X, 0, None))
+
+
+def flatten_text_column(X):
+    """Flatten a single-column DataFrame to a string Series (picklable)."""
+    return X.iloc[:, 0].fillna("").astype(str)
 
 
 def load_data(path):
@@ -73,18 +84,21 @@ def auto_detect_config(df):
     return cfg
 
 
-def build_numerical_transformer(cfg):
-    """Build sklearn Pipeline: impute -> optional log/power -> scale."""
+def build_numerical_transformer(cfg, variant=None):
+    """Build sklearn Pipeline: impute -> optional log/power -> scale.
+
+    ``variant`` selects the extra step ("log" or "power") so each transform is
+    applied only to the columns listed in the config, not all numeric columns.
+    """
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import (StandardScaler, MinMaxScaler, RobustScaler,
                                        PowerTransformer, FunctionTransformer)
     from sklearn.impute import SimpleImputer
-    import numpy as np
     imp = cfg.get("impute", "median")
     steps = [("imputer", SimpleImputer(strategy=imp if imp in ("mean", "median") else "median"))]
-    if cfg.get("log_transform"):
-        steps.append(("log", FunctionTransformer(np.log1p, validate=True)))
-    if cfg.get("power_transform"):
+    if variant == "log":
+        steps.append(("log", FunctionTransformer(safe_log1p, validate=True)))
+    elif variant == "power":
         steps.append(("power", PowerTransformer(method="yeo-johnson")))
     scaler_map = {"standard": StandardScaler, "minmax": MinMaxScaler, "robust": RobustScaler}
     steps.append(("scaler", scaler_map.get(cfg.get("scaler", "standard"), StandardScaler)()))
@@ -112,7 +126,7 @@ def build_text_transformer(cfg):
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import FunctionTransformer
     max_f = cfg.get("max_features", 500)
-    flatten = FunctionTransformer(lambda X: X.iloc[:, 0].fillna("").astype(str), validate=False)
+    flatten = FunctionTransformer(flatten_text_column, validate=False)
     vec = (CountVectorizer(max_features=max_f) if cfg.get("method") == "count"
            else TfidfVectorizer(max_features=max_f))
     return Pipeline([("flatten", flatten), ("vectorizer", vec)])
@@ -165,7 +179,20 @@ def build_column_transformer(config, df):
     num_cfg = config.get("numerical", {})
     num_cols = [c for c in num_cfg.get("columns", []) if c in df.columns]
     if num_cols:
-        transformers.append(("numerical", build_numerical_transformer(num_cfg), num_cols))
+        # log/power transforms apply only to the columns listed in the config
+        log_cols = [c for c in num_cfg.get("log_transform") or [] if c in num_cols]
+        power_cols = [c for c in num_cfg.get("power_transform") or []
+                      if c in num_cols and c not in log_cols]
+        plain_cols = [c for c in num_cols if c not in log_cols and c not in power_cols]
+        if log_cols:
+            transformers.append(
+                ("numerical_log", build_numerical_transformer(num_cfg, "log"), log_cols))
+        if power_cols:
+            transformers.append(
+                ("numerical_power", build_numerical_transformer(num_cfg, "power"), power_cols))
+        if plain_cols:
+            transformers.append(
+                ("numerical", build_numerical_transformer(num_cfg), plain_cols))
     cat_cfg = config.get("categorical", {})
     cat_cols = [c for c in cat_cfg.get("columns", []) if c in df.columns]
     if cat_cols and cat_cfg.get("encoder") != "frequency":
@@ -173,7 +200,10 @@ def build_column_transformer(config, df):
     text_cfg = config.get("text", {})
     for col in [c for c in text_cfg.get("columns", []) if c in df.columns]:
         transformers.append((f"text_{col}", build_text_transformer(text_cfg), [col]))
+    # sparse_threshold=0 forces dense output so pd.DataFrame() below never
+    # receives a scipy sparse matrix (TF-IDF would otherwise trigger one)
     return ColumnTransformer(transformers=transformers, remainder="passthrough",
+                             sparse_threshold=0,
                              verbose_feature_names_out=True) if transformers else None
 
 

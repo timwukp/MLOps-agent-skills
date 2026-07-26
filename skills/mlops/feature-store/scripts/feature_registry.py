@@ -95,7 +95,10 @@ class FeatureRegistry:
     def register(self, feat: FeatureDefinition) -> None:
         if feat.name in self._features:
             logger.warning("Feature '%s' already exists -- updating", feat.name)
-            feat.version = self._features[feat.name].get("version", 0) + 1
+            existing = self._features[feat.name]
+            feat.version = existing.get("version", 0) + 1
+            # Preserve the original creation timestamp on re-registration
+            feat.created_at = existing.get("created_at", feat.created_at)
         self._features[feat.name] = feat.to_dict()
         self._save()
         logger.info("Registered feature '%s' (v%d)", feat.name, feat.version)

@@ -22,7 +22,7 @@ Usage:
         --mixed-precision --gradient-accumulation 4 --output ./checkpoints
 
 Dependencies:
-    - Python 3.8+, torch >= 2.0, torchvision
+    - Python 3.8+, torch >= 2.3 (torch.amp.GradScaler API), torchvision
     - Optional: timm (for additional model architectures)
 """
 
@@ -269,6 +269,13 @@ def validate(model, loader, criterion, device, use_amp: bool) -> Dict[str, float
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
+
+    # Under DDP each rank only sees its shard; all-reduce the counters so
+    # every rank reports metrics over the full validation set.
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        stats = torch.tensor([running_loss, correct, total], dtype=torch.float64, device=device)
+        torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+        running_loss, correct, total = stats.tolist()
 
     return {
         "loss": running_loss / max(total, 1),

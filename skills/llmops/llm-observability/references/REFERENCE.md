@@ -4,8 +4,8 @@
 
 | Feature | LangSmith | Langfuse | Phoenix (Arize) | Helicone | PromptLayer |
 |---|---|---|---|---|---|
-| **License** | Proprietary | Open-source (MIT) | Open-source (Apache 2.0) | Open-source + Cloud | Proprietary |
-| **Self-Hosted** | No | Yes | Yes | Yes | No |
+| **License** | Proprietary | Open-source (MIT core) | Open-source (Elastic License 2.0) | Open-source + Cloud | Proprietary |
+| **Self-Hosted** | Enterprise plan only | Yes | Yes | Yes | No |
 | **Tracing** | Full chain tracing | Full chain tracing | Full chain tracing | Request-level | Request-level |
 | **Evaluation** | Built-in evals | Custom evals | Built-in evals | Limited | Template versioning |
 | **LangChain Integration** | Native | SDK callback | SDK callback | Proxy | SDK wrapper |
@@ -40,7 +40,7 @@ token_metrics = {
     "cached_tokens": 800,          # Prompt cache hits
     "cost_usd": 0.0042,
     "cost_per_1k_tokens": 0.0026,
-    "model": "gpt-4o-mini",
+    "model": "gpt-5-mini",
     "request_type": "chat_completion"
 }
 ```
@@ -77,15 +77,16 @@ Traceloop.init(
 ### LangSmith Tracing
 
 ```python
-# LangSmith native tracing with LangChain
+# LangSmith native tracing with LangChain.
+# Current env vars are LANGSMITH_*; LANGCHAIN_* are legacy aliases.
 import os
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_API_KEY"] = "ls_..."
-os.environ["LANGCHAIN_PROJECT"] = "my-project"
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_API_KEY"] = "lsv2_pt_..."
+os.environ["LANGSMITH_PROJECT"] = "my-project"
 
 # All LangChain calls are automatically traced
 from langchain_openai import ChatOpenAI
-llm = ChatOpenAI(model="gpt-4o")
+llm = ChatOpenAI(model="gpt-5-mini")
 result = llm.invoke("Explain quantum computing")
 # Trace visible at smith.langchain.com
 ```
@@ -93,33 +94,40 @@ result = llm.invoke("Explain quantum computing")
 ### Langfuse Tracing
 
 ```python
-# Langfuse manual tracing for custom pipelines
-from langfuse import Langfuse
+# Langfuse v3 manual tracing for custom pipelines.
+# v3 is OpenTelemetry-based: langfuse.trace()/.span()/.generation() (v2) are gone,
+# replaced by context managers obtained from get_client().
+from langfuse import get_client
 
-langfuse = Langfuse()
+langfuse = get_client()
 
-trace = langfuse.trace(name="rag-pipeline", user_id="user_123")
+with langfuse.start_as_current_span(name="rag-pipeline") as root:
+    root.update_trace(user_id="user_123", input={"query": user_query})
 
-# Trace retrieval step
-span = trace.span(name="retrieval", input={"query": user_query})
-docs = retriever.get_relevant_documents(user_query)
-span.end(output={"num_docs": len(docs)})
+    # Trace retrieval step
+    with langfuse.start_as_current_span(
+        name="retrieval", input={"query": user_query}
+    ) as span:
+        docs = retriever.invoke(user_query)   # get_relevant_documents is deprecated
+        span.update(output={"num_docs": len(docs)})
 
-# Trace generation step
-generation = trace.generation(
-    name="llm-call",
-    model="gpt-4o",
-    input=[{"role": "user", "content": augmented_prompt}],
-    model_parameters={"temperature": 0.1}
-)
-response = llm.invoke(augmented_prompt)
-generation.end(
-    output=response.content,
-    usage={"input": 1250, "output": 340}
-)
+    # Trace generation step
+    with langfuse.start_as_current_generation(
+        name="llm-call",
+        model="gpt-5-mini",
+        input=[{"role": "user", "content": augmented_prompt}],
+        model_parameters={"temperature": 0.1},
+    ) as generation:
+        response = llm.invoke(augmented_prompt)
+        generation.update(
+            output=response.content,
+            usage_details={"input": 1250, "output": 340},
+        )
 
-# Add quality score
-trace.score(name="relevance", value=0.92)
+    # Add quality score
+    root.score_trace(name="relevance", value=0.92)
+
+langfuse.flush()
 ```
 
 ### Trace Hierarchy for Agent Systems
@@ -128,13 +136,13 @@ trace.score(name="relevance", value=0.92)
 Trace: "customer-support-agent"
   |-- Span: "intent-classification" (15ms)
   |-- Span: "tool-selection" (120ms)
-  |   |-- Generation: "llm-reasoning" (model=gpt-4o, tokens=450)
+  |   |-- Generation: "llm-reasoning" (model=gpt-5-mini, tokens=450)
   |-- Span: "tool-execution: search_kb" (340ms)
   |   |-- Span: "embedding-query" (45ms)
   |   |-- Span: "vector-search" (120ms)
   |   |-- Span: "reranking" (80ms)
   |-- Span: "response-generation" (890ms)
-  |   |-- Generation: "llm-synthesis" (model=gpt-4o, tokens=1200)
+  |   |-- Generation: "llm-synthesis" (model=gpt-5, tokens=1200)
   |-- Span: "guardrail-check" (65ms)
 ```
 
@@ -147,7 +155,7 @@ Trace: "customer-support-agent"
 cost_record = {
     "timestamp": "2026-02-27T10:30:00Z",
     "trace_id": "trace_abc123",
-    "model": "gpt-4o",
+    "model": "gpt-5",
     "tokens": {"input": 2400, "output": 600},
     "cost_usd": 0.021,
     # Attribution dimensions

@@ -43,7 +43,12 @@ def load_prompts(prompts_path):
 
 
 def _build_result(start, first_token_time, token_count):
-    """Build a standardized timing result dict."""
+    """Build a standardized timing result dict.
+
+    Note: token_count is the number of streamed chunks (SSE events with
+    content), an approximation of tokens — a chunk may carry more or
+    less than one token, so 'tps' is approximate tokens/sec.
+    """
     elapsed = time.perf_counter() - start
     ttft = (first_token_time - start) if first_token_time else None
     return {

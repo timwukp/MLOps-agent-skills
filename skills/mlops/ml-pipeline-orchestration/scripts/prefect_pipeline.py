@@ -9,25 +9,32 @@ splitting, model training, model evaluation, and conditional model registration.
 
 Features:
 - Parameterized flow for flexible execution.
-- Task-level caching based on input hashing (skips redundant work).
+- Task-level caching via Prefect 3 cache policies (INPUTS + TASK_SOURCE).
 - Per-task retry configuration with exponential backoff.
 - Rich Prefect artifacts (tables, markdown) for observability.
 - Structured logging via Prefect's run logger.
-- Deployment configuration for scheduled and ad-hoc execution.
-- Subflow composition for modular design.
+- Deployment via flow.deploy() / flow.serve() (Prefect 3).
+- Subflow composition, plus a real concurrent fan-out using task.submit().
 
 Requirements:
-    pip install prefect pandas scikit-learn
+    pip install "prefect>=3" pandas scikit-learn
 
 Usage (local):
     python prefect_pipeline.py
 
-Usage (deployed):
-    # Register the deployment
-    prefect deploy --name ml-training-nightly
+Usage (deployed -- Prefect 3):
+    # One-time: create a work pool for the deployment to target
+    prefect work-pool create ml-process-pool --type process
 
-    # Or programmatically (see bottom of this file)
+    # Register the deployment (flow.deploy) and start a worker
     python prefect_pipeline.py --deploy
+    prefect worker start --pool ml-process-pool
+
+    # Or skip work pools entirely and serve the schedule from this process
+    python prefect_pipeline.py --serve
+
+    # Hyperparameter grid search with concurrent fan-out
+    python prefect_pipeline.py --search
 
 License: Apache-2.0
 """
@@ -36,15 +43,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import pickle
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification
 from sklearn.ensemble import RandomForestClassifier
@@ -60,7 +65,20 @@ from sklearn.model_selection import train_test_split
 
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact, create_table_artifact
-from prefect.tasks import task_input_hash
+
+# Prefect 3 replaced `cache_key_fn=task_input_hash` with declarative cache
+# policies. INPUTS hashes the task arguments; TASK_SOURCE also invalidates when
+# the task's code changes. Fall back to the Prefect 2 helper if unavailable.
+try:  # Prefect 3.x
+    from prefect.cache_policies import INPUTS, TASK_SOURCE
+
+    CACHE_POLICY = INPUTS + TASK_SOURCE
+    _CACHE_KWARGS = {"cache_policy": CACHE_POLICY}
+except ImportError:  # Prefect 2.x
+    from prefect.tasks import task_input_hash
+
+    CACHE_POLICY = None
+    _CACHE_KWARGS = {"cache_key_fn": task_input_hash}
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -80,6 +98,28 @@ def _artifact_dir(run_name: str, stage: str) -> Path:
     return path
 
 
+def _deterministic_run_name(**params: Any) -> str:
+    """
+    Build a run name from the ingestion parameters, NOT from wall-clock time.
+
+    This is what makes caching work at all. The original implementation used
+    ``datetime.utcnow().strftime('%Y%m%d_%H%M%S')``, which broke the cache in two
+    directions at once:
+
+      1. Every downstream task receives a dict containing ``run_name``, so the
+         input hash changed every second and the cache could NEVER hit.
+      2. ``ingest_data``'s own cache is keyed only on its scalar arguments, so it
+         DID hit — and returned a stale ``run_name`` pointing at a directory from
+         an earlier run, which every downstream task then wrote into.
+
+    Deriving the name from the parameters makes a cache hit self-consistent: the
+    same inputs map to the same run name, and that directory really does hold the
+    corresponding artifacts. Use ``cache_expiration`` for freshness.
+    """
+    payload = json.dumps(params, sort_keys=True, default=str).encode()
+    return f"run_{hashlib.sha256(payload).hexdigest()[:12]}"
+
+
 # ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
@@ -90,9 +130,9 @@ def _artifact_dir(run_name: str, stage: str) -> Path:
     description="Ingest raw data from source or generate synthetic demo data",
     retries=3,
     retry_delay_seconds=[10, 60, 300],
-    cache_key_fn=task_input_hash,
     cache_expiration=timedelta(hours=24),
     tags=["data", "ingestion"],
+    **_CACHE_KWARGS,
 )
 def ingest_data(
     data_source: str = "",
@@ -110,7 +150,11 @@ def ingest_data(
         dict with ``data_path``, ``num_rows``, ``num_cols``.
     """
     logger = get_run_logger()
-    run_name = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    # Derived from the inputs, so a cache hit still points at the right artifacts.
+    run_name = _deterministic_run_name(
+        data_source=data_source, n_samples=n_samples,
+        n_features=n_features, random_seed=random_seed,
+    )
     artifact_dir = _artifact_dir(run_name, "ingestion")
     output_path = str(artifact_dir / "raw_data.csv")
 
@@ -221,8 +265,8 @@ def validate_data(ingest_meta: dict) -> dict:
     description="Generate derived features: interactions, polynomials, ratios, scaling",
     retries=2,
     retry_delay_seconds=30,
-    cache_key_fn=task_input_hash,
     cache_expiration=timedelta(hours=12),
+    **_CACHE_KWARGS,
     tags=["features", "engineering"],
 )
 def engineer_features(validation_result: dict) -> dict:
@@ -289,8 +333,8 @@ def engineer_features(validation_result: dict) -> dict:
     description="Stratified train/test split",
     retries=1,
     retry_delay_seconds=10,
-    cache_key_fn=task_input_hash,
     cache_expiration=timedelta(hours=12),
+    **_CACHE_KWARGS,
     tags=["data", "splitting"],
 )
 def split_data(
@@ -340,7 +384,7 @@ def split_data(
 def train_model(
     split_meta: dict,
     n_estimators: int = 100,
-    max_depth: int = 10,
+    max_depth: Optional[int] = 10,   # None => grow until leaves are pure
     min_samples_split: int = 5,
     random_seed: int = 42,
 ) -> dict:
@@ -495,7 +539,8 @@ def register_model(model_meta: dict, eval_metrics: dict) -> dict:
     registry_dir = Path(DEFAULT_CONFIG["artifact_root"]) / "registry"
     registry_dir.mkdir(parents=True, exist_ok=True)
 
-    version = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    # datetime.utcnow() is deprecated in 3.12 and returns a naive datetime.
+    version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     registered_path = str(registry_dir / f"model_v{version}.pkl")
 
     import shutil
@@ -511,7 +556,7 @@ def register_model(model_meta: dict, eval_metrics: dict) -> dict:
             "auc_roc": eval_metrics["auc_roc"],
         },
         "hyperparams": model_meta["hyperparams"],
-        "registered_at": datetime.utcnow().isoformat(),
+        "registered_at": datetime.now(timezone.utc).isoformat(),
     }
 
     manifest_path = str(registry_dir / f"manifest_v{version}.json")
@@ -598,7 +643,7 @@ def data_preparation_flow(
 def training_evaluation_flow(
     split_meta: dict,
     n_estimators: int = 100,
-    max_depth: int = 10,
+    max_depth: Optional[int] = 10,   # None => grow until leaves are pure
     min_samples_split: int = 5,
     quality_threshold: float = 0.85,
     random_seed: int = 42,
@@ -672,7 +717,7 @@ def ml_training_pipeline(
     test_ratio: float = 0.2,
     # Model parameters
     n_estimators: int = 100,
-    max_depth: int = 10,
+    max_depth: Optional[int] = 10,   # None => grow until leaves are pure
     min_samples_split: int = 5,
     # Quality gate
     quality_threshold: float = 0.85,
@@ -771,40 +816,70 @@ def ml_training_pipeline(
 # ---------------------------------------------------------------------------
 
 
-def create_deployment():
+DEPLOYMENT_PARAMETERS = {
+    "data_source": "",
+    "n_samples": 10000,
+    "n_features": 20,
+    "test_ratio": 0.2,
+    "n_estimators": 200,
+    "max_depth": 12,
+    "quality_threshold": 0.88,
+    "random_seed": 42,
+}
+
+
+def create_deployment(work_pool_name: str = "ml-process-pool"):
     """
     Create a Prefect deployment for the training pipeline.
 
-    Run with:
-        python prefect_pipeline.py --deploy
-    """
-    from prefect.deployments import Deployment
-    from prefect.server.schemas.schedules import CronSchedule
+    Prefect 3 removed ``prefect.deployments.Deployment`` and
+    ``Deployment.build_from_flow``. Deployments are now created from the flow
+    object itself:
 
-    deployment = Deployment.build_from_flow(
-        flow=ml_training_pipeline,
+      - ``flow.deploy(...)``  — registers with the API against a work pool, and
+        builds/pushes an image for container-based pools. Needs an existing work
+        pool: ``prefect work-pool create ml-process-pool --type process``.
+      - ``flow.serve(...)``   — runs a long-lived local process that executes the
+        schedule with no work pool or worker at all. Best for development.
+
+    Note also that "agents" and the old ``default-agent-pool`` naming are gone in
+    Prefect 3; the execution component is a *worker* attached to a work pool
+    (``prefect worker start --pool ml-process-pool``).
+
+    Run with:
+        python prefect_pipeline.py --deploy      # flow.deploy against a work pool
+        python prefect_pipeline.py --serve       # flow.serve, no worker needed
+    """
+    deployment_id = ml_training_pipeline.deploy(
         name="ml-training-nightly",
+        work_pool_name=work_pool_name,
         version="1.0",
         description="Nightly ML model training pipeline with quality gating",
-        schedule=CronSchedule(cron="0 2 * * *", timezone="UTC"),
-        parameters={
-            "data_source": "",
-            "n_samples": 10000,
-            "n_features": 20,
-            "test_ratio": 0.2,
-            "n_estimators": 200,
-            "max_depth": 12,
-            "quality_threshold": 0.88,
-            "random_seed": 42,
-        },
+        cron="0 2 * * *",          # Prefect 3 accepts cron/interval/rrule directly
+        parameters=DEPLOYMENT_PARAMETERS,
         tags=["ml", "training", "production", "nightly"],
-        work_pool_name="default-agent-pool",
+        # A pure-Python work pool needs no image build:
+        build=False,
+        push=False,
     )
-    deployment_id = deployment.apply()
     print(f"Deployment created: {deployment_id}")
-    print(f"  Name   : {deployment.name}")
-    print(f"  Schedule: {deployment.schedule}")
+    print(f"  Name      : ml-training-nightly")
+    print(f"  Work pool : {work_pool_name}")
+    print(f"  Schedule  : 0 2 * * * (UTC)")
+    print(f"  Start a worker with: prefect worker start --pool {work_pool_name}")
     return deployment_id
+
+
+def serve_flow():
+    """
+    Serve the flow locally on its schedule (Prefect 3; no work pool or worker).
+    """
+    ml_training_pipeline.serve(
+        name="ml-training-nightly-local",
+        cron="0 2 * * *",
+        parameters=DEPLOYMENT_PARAMETERS,
+        tags=["ml", "training", "local"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -829,8 +904,11 @@ def hyperparameter_search_flow(
     """
     Run a grid search over hyperparameter combinations.
 
-    Uses Prefect's `.map()` for parallel fan-out across configurations,
-    then selects the best model.
+    Fan-out is done with ``task.submit()``, which returns a future immediately and
+    lets the task runner execute candidates concurrently. A plain
+    ``for config in configs: train_model(...)`` loop calls the task in the
+    foreground and blocks on each result, so it is strictly sequential no matter
+    what the docstring claims — submit/resolve is what actually parallelizes.
     """
     logger = get_run_logger()
 
@@ -844,7 +922,9 @@ def hyperparameter_search_flow(
     )
     split_meta = data_result["split_meta"]
 
-    # Hyperparameter grid
+    # Hyperparameter grid. max_depth=None means "expand until leaves are pure"
+    # in scikit-learn; keep it as None rather than silently substituting 100,
+    # which is a different (and arbitrary) model.
     configs = [
         {"n_estimators": 50, "max_depth": 5, "min_samples_split": 10},
         {"n_estimators": 100, "max_depth": 10, "min_samples_split": 5},
@@ -853,19 +933,32 @@ def hyperparameter_search_flow(
         {"n_estimators": 100, "max_depth": None, "min_samples_split": 5},
     ]
 
-    # Fan-out: train candidates in parallel
-    results = []
-    for i, config in enumerate(configs):
-        logger.info("Training candidate %d/%d: %s", i + 1, len(configs), config)
-        model_meta = train_model(
+    # Fan-out: submit all training tasks, then submit each evaluation against
+    # its training future. Prefect resolves the futures for us.
+    train_futures = [
+        train_model.submit(
             split_meta,
             n_estimators=config["n_estimators"],
-            max_depth=config["max_depth"] if config["max_depth"] is not None else 100,
+            max_depth=config["max_depth"],
             min_samples_split=config["min_samples_split"],
             random_seed=random_seed,
         )
-        eval_metrics = evaluate_model(model_meta, split_meta)
-        results.append({"config": config, "model_meta": model_meta, "metrics": eval_metrics})
+        for config in configs
+    ]
+    logger.info("Submitted %d training candidates for concurrent execution",
+                len(train_futures))
+    eval_futures = [
+        evaluate_model.submit(future, split_meta) for future in train_futures
+    ]
+
+    # Fan-in: resolve the futures.
+    results = []
+    for config, train_future, eval_future in zip(configs, train_futures, eval_futures):
+        results.append({
+            "config": config,
+            "model_meta": train_future.result(),
+            "metrics": eval_future.result(),
+        })
 
     # Fan-in: select best model
     best = max(results, key=lambda r: r["metrics"]["accuracy"])
@@ -892,6 +985,8 @@ def hyperparameter_search_flow(
 if __name__ == "__main__":
     if "--deploy" in sys.argv:
         create_deployment()
+    elif "--serve" in sys.argv:
+        serve_flow()
     elif "--search" in sys.argv:
         result = hyperparameter_search_flow()
         print(f"\nHyperparameter search result:\n{json.dumps(result, indent=2, default=str)}")

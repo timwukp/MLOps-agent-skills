@@ -5,9 +5,9 @@
 | Feature | vLLM | TGI | Ollama | llama.cpp | TensorRT-LLM |
 |---------|------|-----|--------|-----------|---------------|
 | Primary Use | Production serving | Production serving | Local/dev | Local/edge | Max throughput |
-| PagedAttention | Yes | Yes | Via llama.cpp | No (uses KV cache) | Yes |
-| Continuous Batching | Yes | Yes | No | No | Yes |
-| Tensor Parallelism | Yes | Yes | No | Limited | Yes |
+| PagedAttention | Yes | Yes | No (unified KV cache via llama.cpp) | No (unified KV cache) | Yes |
+| Continuous Batching | Yes | Yes | Yes (OLLAMA_NUM_PARALLEL) | Yes (server --cont-batching) | Yes |
+| Tensor Parallelism | Yes | Yes | No (layer split only) | No (layer/row split only) | Yes |
 | Quantization Support | AWQ, GPTQ, FP8 | AWQ, GPTQ, bitsandbytes | GGUF | GGUF, all formats | FP8, INT8, INT4 |
 | OpenAI-Compatible API | Yes | Yes (Messages API) | Yes | Yes (via server) | Yes (via Triton) |
 | Speculative Decoding | Yes | Yes | No | Yes | Yes |
@@ -85,7 +85,7 @@ Manages KV cache like virtual memory pages, eliminating waste from pre-allocatio
 
 ### Prefix Caching
 
-When requests share system prompts or prefixes, vLLM reuses the KV cache for the shared prefix. Enable with `--enable-prefix-caching`. Beneficial for long system prompts, RAG, and chat applications.
+When requests share system prompts or prefixes, vLLM reuses the KV cache for the shared prefix. Enabled by default in the vLLM V1 engine (disable with `--no-enable-prefix-caching`). Beneficial for long system prompts, RAG, and chat applications.
 
 ## Deployment Architectures
 
@@ -136,15 +136,16 @@ spec:
 
 ## Cost Comparison: Self-Hosted vs API Providers
 
-### Cost per 1M Tokens (approximate, as of 2025)
+### Cost per 1M Tokens (approximate, as of mid-2026)
 
 | Option | Input | Output | Notes |
 |--------|-------|--------|-------|
-| GPT-4o (OpenAI) | $2.50 | $10.00 | Managed, no infra overhead |
-| Claude 3.5 Sonnet | $3.00 | $15.00 | Managed, no infra overhead |
-| Llama 3.1 70B (Groq) | $0.59 | $0.79 | Managed, fast inference |
-| Llama 3.1 70B (self-hosted, A100) | ~$0.20-0.40 | ~$0.60-1.20 | Requires DevOps expertise |
-| Llama 3.1 8B (self-hosted, L4) | ~$0.03-0.05 | ~$0.10-0.20 | High-volume simple tasks |
+| gpt-5 (OpenAI) | $1.25 | $10.00 | Managed, no infra overhead |
+| claude-sonnet-5 | $3.00 | $15.00 | Managed, no infra overhead |
+| claude-haiku-4-5 | $1.00 | $5.00 | Managed, cheaper tier |
+| Open ~70B model (Groq/Together) | ~$0.60 | ~$0.80 | Managed, fast inference |
+| Open ~70B model (self-hosted, A100) | ~$0.20-0.40 | ~$0.60-1.20 | Requires DevOps expertise |
+| Open ~8B model (self-hosted, L4) | ~$0.03-0.05 | ~$0.10-0.20 | High-volume simple tasks |
 
 ### Break-Even Analysis
 

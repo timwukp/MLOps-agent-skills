@@ -54,7 +54,7 @@ actionable guidance.
 
 | Explainer | Model Type | Algorithm | Speed | Exact | When to Use |
 |-----------|-----------|-----------|-------|-------|-------------|
-| **TreeExplainer** | Tree ensembles (XGBoost, LightGBM, CatBoost, sklearn RF/GBT) | Tree path-based Shapley computation | Very fast (O(TLD)) | Yes | Always use for tree models; no reason to use KernelSHAP |
+| **TreeExplainer** | Tree ensembles (XGBoost, LightGBM, CatBoost, sklearn RF/GBT) | Tree path-based Shapley computation | Very fast (O(TLD^2), T trees x L leaves x D depth) | Yes | Always use for tree models; no reason to use KernelSHAP |
 | **KernelExplainer** | Any model (model-agnostic) | Weighted linear regression on sampled coalitions | Slow (O(2^M) approx.) | No (approximate) | Black-box models; non-standard architectures; small feature sets |
 | **DeepExplainer** | Deep neural networks (PyTorch, TF/Keras) | DeepLIFT-based backpropagation | Fast | No (approximate) | Deep learning classification/regression; faster than KernelSHAP |
 | **GradientExplainer** | Differentiable models (PyTorch, TF/Keras) | Expected gradients (integrated gradients + SHAP) | Fast | No (approximate) | When DeepExplainer is not compatible; combines integrated gradients with Shapley |
@@ -70,7 +70,17 @@ import shap
 # TreeExplainer -- always use for tree models
 explainer = shap.TreeExplainer(xgb_model)
 shap_values = explainer.shap_values(X_test)
-shap.summary_plot(shap_values, X_test)
+# For a classifier, SHAP >= 0.45 returns (n_samples, n_features, n_classes).
+# Select a class before aggregating or plotting:
+if shap_values.ndim == 3:
+    shap_values = shap_values[..., 1]
+shap.summary_plot(shap_values, X_test)   # legacy API for raw arrays
+
+# Modern API: build an Explanation object and use the shap.plots namespace.
+# summary_plot still works but is no longer the documented entry point.
+explanation = shap.Explainer(xgb_model)(X_test)
+shap.plots.beeswarm(explanation)   # replaces summary_plot(...)
+shap.plots.bar(explanation)        # replaces summary_plot(..., plot_type="bar")
 
 # KernelExplainer -- model-agnostic fallback
 explainer = shap.KernelExplainer(model.predict, shap.sample(X_train, 100))
@@ -103,10 +113,16 @@ shap_values = explainer.shap_values(test_batch, nsamples=200)
 | **Demographic Parity** | Equal positive prediction rates across groups | P(Y_hat=1 \| A=0) = P(Y_hat=1 \| A=1) | Ratio between 0.8-1.25 (4/5ths rule) | No ground truth labels; hiring, lending decisions |
 | **Equalized Odds** | Equal TPR and FPR across groups | TPR_A=0 = TPR_A=1 AND FPR_A=0 = FPR_A=1 | Difference < 0.05-0.10 | Classification with ground truth; criminal justice, medical diagnosis |
 | **Equal Opportunity** | Equal TPR across groups (relaxed equalized odds) | TPR_A=0 = TPR_A=1 | Difference < 0.05-0.10 | When false negatives are the primary concern |
-| **Calibration** | Equal positive predictive value across groups | P(Y=1 \| Y_hat=p, A=a) = p for all a | Calibration curves overlap | Risk scoring; insurance; credit |
+| **Calibration** (test-fairness / calibration-within-groups) | Predicted scores mean the same thing in every group | P(Y=1 \| Y_hat=p, A=a) = p for all a and all p | Calibration curves overlap | Risk scoring; insurance; credit |
 | **Disparate Impact** | Ratio of positive outcome rates | P(Y_hat=1 \| A=0) / P(Y_hat=1 \| A=1) | > 0.8 (80% rule, legal standard) | Legal compliance; ECOA, employment law |
 | **Predictive Parity** | Equal precision across groups | PPV_A=0 = PPV_A=1 | Difference < 0.05-0.10 | When false positives are costly |
 | **Treatment Equality** | Equal ratio of FN to FP across groups | FN/FP for A=0 = FN/FP for A=1 | Ratio close to 1.0 | Balancing error types across groups |
+
+Calibration and predictive parity are related but distinct: calibration is a
+condition on the *whole score range* (each score value p must correspond to the
+same observed rate in every group), while predictive parity is a single-threshold
+condition on PPV. A model can be calibrated overall yet fail predictive parity at
+your chosen cutoff, and vice versa.
 
 ### Impossibility Results
 
@@ -352,7 +368,7 @@ Client -> API Gateway -> [Model Service + Sidecar Logger] -> Response
 - **LIME**: https://github.com/marcotcr/lime
 - **Captum**: https://captum.ai/
 - **InterpretML**: https://interpret.ml/
-- **AIF360**: https://aif360.mybluemix.net/
+- **AIF360**: https://aif360.readthedocs.io/ (source: https://github.com/Trusted-AI/AIF360)
 - **Fairlearn**: https://fairlearn.org/
 - **What-If Tool**: https://pair-code.github.io/what-if-tool/
 

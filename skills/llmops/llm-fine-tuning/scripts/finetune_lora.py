@@ -2,8 +2,8 @@
 """LoRA/QLoRA fine-tuning pipeline for LLMs.
 
 Usage:
-    python finetune_lora.py --model meta-llama/Llama-3.1-8B --data train.jsonl --output ./lora-output
-    python finetune_lora.py --model meta-llama/Llama-3.1-8B --data train.jsonl --qlora --output ./qlora-output
+    python finetune_lora.py --model Qwen/Qwen3-8B --data train.jsonl --output ./lora-output
+    python finetune_lora.py --model Qwen/Qwen3-8B --data train.jsonl --qlora --output ./qlora-output
 """
 import argparse
 import json
@@ -75,9 +75,15 @@ def setup_model(model_name, use_qlora=False):
             bnb_4bit_use_double_quant=True,
         )
     else:
-        load_kwargs["torch_dtype"] = torch.bfloat16
+        # dtype= replaces torch_dtype= (deprecated in transformers>=4.56)
+        load_kwargs["dtype"] = torch.bfloat16
 
     model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
+
+    if use_qlora:
+        from peft import prepare_model_for_kbit_training
+        model = prepare_model_for_kbit_training(model)
+
     return model, tokenizer
 
 
@@ -106,11 +112,11 @@ def setup_lora(model, rank=16, alpha=32, target_modules=None, dropout=0.05):
 
 def train(model, tokenizer, train_dataset, val_dataset, output_dir, **kwargs):
     """Run training with SFTTrainer."""
-    from transformers import TrainingArguments
-    from trl import SFTTrainer
+    from trl import SFTConfig, SFTTrainer
 
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=output_dir,
+        max_length=kwargs.get("max_seq_length", 2048),
         num_train_epochs=kwargs.get("epochs", 3),
         per_device_train_batch_size=kwargs.get("batch_size", 4),
         gradient_accumulation_steps=kwargs.get("grad_accum", 4),
@@ -136,7 +142,6 @@ def train(model, tokenizer, train_dataset, val_dataset, output_dir, **kwargs):
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         processing_class=tokenizer,
-        max_seq_length=kwargs.get("max_seq_length", 2048),
     )
 
     logger.info("Starting training...")

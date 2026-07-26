@@ -34,6 +34,9 @@ def _prepare_Xy(df, target):
 
 
 def _is_clf(y):
+    """Heuristic: treat the target as classification if it is non-numeric
+    (object dtype) or has fewer than 20 distinct values. Low-cardinality
+    integer regression targets will be misclassified; adjust if needed."""
     return y.dtype == "object" or y.nunique() < 20
 
 # -- Filter methods ---------------------------------------------------------
@@ -66,10 +69,13 @@ def mutual_information_ranking(X, y, n):
 
 def chi_squared_ranking(X, y, n):
     from sklearn.feature_selection import chi2
+    if not _is_clf(y):
+        logger.info("Chi-squared skipped (only valid for classification targets)")
+        return [], {}
     try:
         chi_scores, _ = chi2(X.clip(lower=0), y)
     except Exception as e:
-        logger.warning(f"Chi-squared failed: {e}"); return list(X.columns[:n]), {}
+        logger.warning(f"Chi-squared failed: {e}"); return [], {}
     scores = dict(zip(X.columns, chi_scores))
     return sorted(scores, key=scores.get, reverse=True)[:n], scores
 

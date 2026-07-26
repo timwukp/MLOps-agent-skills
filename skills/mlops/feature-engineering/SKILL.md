@@ -91,7 +91,8 @@ encoder = OrdinalEncoder(categories=[["small", "medium", "large"]])
 
 # Target encoding - for high cardinality (uses target mean per category)
 encoder = TargetEncoder(smoothing=10)
-X["city_encoded"] = encoder.fit_transform(X["city"], y)
+X["city_encoded"] = encoder.fit_transform(X["city"], y).iloc[:, 0]  # returns a DataFrame
+# Note: sklearn >= 1.3 ships sklearn.preprocessing.TargetEncoder with built-in CV against leakage
 
 # Binary encoding - for high cardinality (fewer columns than one-hot)
 encoder = BinaryEncoder(cols=["zip_code"])
@@ -210,8 +211,10 @@ selected = X.columns[lasso.coef_ != 0]
 # SHAP-based selection
 model = RandomForestClassifier(n_estimators=100).fit(X, y)
 explainer = shap.TreeExplainer(model)
-shap_values = explainer.shap_values(X)
-importance = np.abs(shap_values).mean(axis=0)
+sv = np.asarray(explainer.shap_values(X))
+# Classifiers return one SHAP array per class -> 3-D (samples, features, classes);
+# reduce over samples AND classes. Regressors return 2-D (samples, features).
+importance = np.abs(sv).mean(axis=(0, 2)) if sv.ndim == 3 else np.abs(sv).mean(axis=0)
 top_features = X.columns[np.argsort(importance)[-20:]]
 ```
 

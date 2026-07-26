@@ -59,16 +59,19 @@ supports all major ML frameworks (PyTorch, TensorFlow, scikit-learn, JAX, ONNX, 
 
 ### 1.2 MITRE ATLAS (Adversarial Threat Landscape for AI Systems)
 
-Key tactic categories:
+Key tactic categories (representative technique IDs in parentheses):
 
-- **Reconnaissance**: Discover model architecture, training data sources, API endpoints.
-- **Resource Development**: Build adversarial tooling, acquire surrogate models.
-- **Initial Access**: Exploit ML API input validation, poison public datasets.
-- **Execution**: Trigger malicious model behavior via crafted inputs.
-- **Persistence**: Implant backdoors that survive retraining cycles.
-- **Exfiltration**: Extract model weights, training data, or membership information.
-- **Impact**: Degrade model performance, cause biased predictions, deny service.
+- **Reconnaissance**: Discover model family, artifacts, and API surface (AML.T0006 Active Scanning, AML.T0007 Discover AI Artifacts).
+- **Resource Development**: Acquire public artifacts, train proxy models, build tooling (AML.T0002, AML.T0005).
+- **Initial Access**: Supply chain compromise, publish poisoned datasets (AML.T0010, AML.T0019).
+- **Persistence**: Poison training data or manipulate weights so the backdoor survives (AML.T0020, AML.T0018).
+- **AI Attack Staging**: Craft adversarial data and stage backdoor triggers (AML.T0043 and sub-techniques).
+- **Exfiltration**: Membership inference, model inversion, model extraction (AML.T0024.000/.001/.002).
+- **Impact**: Denial of ML service, integrity erosion, cost harvesting (AML.T0029, AML.T0031, AML.T0034).
+- **LLM-specific**: Prompt injection and jailbreak (AML.T0051, AML.T0054).
 
+Technique IDs and names change between ATLAS releases — verify at
+https://atlas.mitre.org/techniques before citing them in a threat model or audit.
 Always map your threat model to both OWASP ML Top 10 and MITRE ATLAS to ensure full coverage.
 See [REFERENCE.md](references/REFERENCE.md) for the full ATLAS technique catalog and OWASP deep dives.
 
@@ -97,9 +100,19 @@ def fgsm_attack(model, images, labels, epsilon, loss_fn):
 **PGD — Projected Gradient Descent** (stronger iterative attack):
 
 ```python
-def pgd_attack(model, images, labels, epsilon, alpha, num_steps, loss_fn):
-    """Generate PGD adversarial examples."""
+def pgd_attack(model, images, labels, epsilon, alpha, num_steps, loss_fn,
+               random_start=True):
+    """
+    Generate PGD adversarial examples.
+
+    The uniform random start inside the epsilon-ball is what makes this PGD
+    (Madry et al., 2018). Without it the loop is BIM/I-FGSM and is a measurably
+    weaker attack, so robustness numbers come out optimistic.
+    """
     perturbed = images.clone().detach()
+    if random_start:
+        perturbed = perturbed + torch.empty_like(perturbed).uniform_(-epsilon, epsilon)
+        perturbed = torch.clamp(perturbed, 0, 1).detach()
     for _ in range(num_steps):
         perturbed.requires_grad = True
         outputs = model(perturbed)
@@ -214,9 +227,13 @@ def build_dp_model(input_shape, num_classes, l2_norm_clip=1.0,
         l2_norm_clip=l2_norm_clip, noise_multiplier=noise_multiplier,
         num_microbatches=1, learning_rate=learning_rate,
     )
-    model.compile(optimizer=optimizer,
-                  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-                  metrics=['accuracy'])
+    # DP optimizers need PER-EXAMPLE losses to clip per-example gradients, so the
+    # loss must use reduction=NONE. With the default (mean) reduction TF Privacy
+    # raises at fit() time.
+    loss = tf.keras.losses.SparseCategoricalCrossentropy(
+        from_logits=True, reduction=tf.losses.Reduction.NONE,
+    )
+    model.compile(optimizer=optimizer, loss=loss, metrics=['accuracy'])
     return model
 ```
 
@@ -238,34 +255,23 @@ from dataclasses import dataclass, field
 from typing import Set
 
 class Permission(Enum):
-    MODEL_READ = "model:read"
-    MODEL_WRITE = "model:write"
-    MODEL_DEPLOY = "model:deploy"
-    MODEL_DELETE = "model:delete"
+    MODEL_READ = "model:read"; MODEL_WRITE = "model:write"
+    MODEL_DEPLOY = "model:deploy"; MODEL_DELETE = "model:delete"
     MODEL_PREDICT = "model:predict"
-    DATA_READ = "data:read"
-    DATA_WRITE = "data:write"
-    EXPERIMENT_READ = "experiment:read"
-    EXPERIMENT_WRITE = "experiment:write"
+    DATA_READ = "data:read"; DATA_WRITE = "data:write"
+    EXPERIMENT_READ = "experiment:read"; EXPERIMENT_WRITE = "experiment:write"
     AUDIT_READ = "audit:read"
     ADMIN = "admin"
 
+P = Permission
 ROLES = {
-    "viewer": {Permission.MODEL_READ, Permission.EXPERIMENT_READ},
-    "data_scientist": {
-        Permission.MODEL_READ, Permission.MODEL_WRITE, Permission.DATA_READ,
-        Permission.EXPERIMENT_READ, Permission.EXPERIMENT_WRITE, Permission.MODEL_PREDICT,
-    },
-    "ml_engineer": {
-        Permission.MODEL_READ, Permission.MODEL_WRITE, Permission.MODEL_DEPLOY,
-        Permission.DATA_READ, Permission.DATA_WRITE,
-        Permission.EXPERIMENT_READ, Permission.EXPERIMENT_WRITE, Permission.MODEL_PREDICT,
-    },
-    "auditor": {
-        Permission.MODEL_READ, Permission.DATA_READ,
-        Permission.EXPERIMENT_READ, Permission.AUDIT_READ,
-    },
-    "admin": {Permission.ADMIN},
+    "viewer": {P.MODEL_READ, P.EXPERIMENT_READ},
+    "data_scientist": {P.MODEL_READ, P.MODEL_WRITE, P.DATA_READ,
+                       P.EXPERIMENT_READ, P.EXPERIMENT_WRITE, P.MODEL_PREDICT},
+    "ml_engineer": {P.MODEL_READ, P.MODEL_WRITE, P.MODEL_DEPLOY, P.DATA_READ,
+                    P.DATA_WRITE, P.EXPERIMENT_READ, P.EXPERIMENT_WRITE, P.MODEL_PREDICT},
+    "auditor": {P.MODEL_READ, P.DATA_READ, P.EXPERIMENT_READ, P.AUDIT_READ},
+    "admin": {P.ADMIN},
 }
 
 @dataclass
@@ -276,11 +282,15 @@ class AccessPolicy:
     denied_permissions: Set[Permission] = field(default_factory=set)
 
     def has_permission(self, permission: Permission) -> bool:
-        if Permission.ADMIN in self._all_granted():
-            return True
+        # Explicit deny wins over every grant, including ADMIN — otherwise a
+        # break-glass admin account can never be scoped down, and a compromised
+        # admin token ignores the deny list entirely.
         if permission in self.denied_permissions:
             return False
-        return permission in self._all_granted()
+        granted = self._all_granted()
+        if Permission.ADMIN in granted:
+            return True
+        return permission in granted
 
     def _all_granted(self) -> Set[Permission]:
         perms = set(self.extra_permissions)
@@ -298,14 +308,10 @@ def enforce_access(policy: AccessPolicy, required: Permission, resource_id: str)
 
 ---
 
-## 9-13. Artifact Signing, Supply Chain, Secrets, and Audit Logging
+## 9. Model Artifact Signing
 
-These operational security patterns are documented in [REFERENCE.md](references/REFERENCE.md):
-
-- **Model Artifact Signing** — SHA-256 hashing, HMAC signing/verification, Sigstore/cosign integration
-- **Supply Chain Security** — Dependency scanning (pip-audit, safety, trivy, fickling), model provenance tracking
-- **Secret Management** — SecretProvider abstraction, Vault integration, best practices
-- **Audit Logging** — Structured AuditEvent logging, prediction logging, data access tracking
+Covered in [REFERENCE.md](references/REFERENCE.md) section 11: SHA-256 hashing,
+HMAC signing/verification, and Sigstore/cosign integration.
 
 ---
 
@@ -364,79 +370,80 @@ class InputValidator:
 ### 10.3 FastAPI Secure Serving Example
 
 ```python
-from fastapi import FastAPI, Depends, HTTPException
+from typing import List
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field, validator
-from slowapi import Limiter
+from pydantic import BaseModel, Field, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 app = FastAPI()
 security = HTTPBearer()
+
+# slowapi wiring: the limiter must be on app.state and the RateLimitExceeded
+# handler must be registered, or decorated routes raise instead of returning 429.
 limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 class MLInput(BaseModel):
+    # Pydantic v2: min_length/max_length apply to the list itself.
     features: List[float] = Field(..., min_length=10, max_length=10)
 
-    @validator("features", each_item=True)
-    def check_feature_range(cls, v):
-        if not -1000 <= v <= 1000:
-            raise ValueError(f"Feature value {v} out of range [-1000, 1000]")
+    @field_validator("features")
+    @classmethod
+    def check_feature_range(cls, v: List[float]) -> List[float]:
+        for x in v:
+            if not -1000 <= x <= 1000:
+                raise ValueError(f"Feature value {x} out of range [-1000, 1000]")
         return v
 
 @app.post("/predict")
 @limiter.limit("100/minute")
-async def predict(request: MLInput, credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def predict(
+    request: Request,                     # required: slowapi reads the client IP from it
+    payload: MLInput,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
     if not verify_token(credentials.credentials):
         raise HTTPException(status_code=401, detail="Invalid token")
-    return model.predict(request.features)
+    return model.predict(payload.features)
 ```
 
 See [REFERENCE.md](references/REFERENCE.md) for TokenAuthenticator class, query rate limiter with extraction detection, and authentication details.
 
 ---
 
+## 11-13. Supply Chain, Secrets, and Audit Logging
+
+See [REFERENCE.md](references/REFERENCE.md) sections 12-14:
+
+- **Supply Chain Security** — Dependency scanning (pip-audit, safety scan, trivy, fickling), model provenance tracking
+- **Secret Management** — SecretProvider abstraction, Vault integration, best practices
+- **Audit Logging** — Structured AuditEvent logging, prediction logging, data access tracking
+
+---
+
 ## 14. Data Anonymization and PII Detection
 
+Use `scripts/privacy_guard.py` — it ships 11 pattern categories, per-category
+confidence and severity, typed masking, and DataFrame support:
+
 ```python
-import re
-from typing import List, Tuple
-from dataclasses import dataclass
+from privacy_guard import PIIDetector, PIIMasker, DataAnonymizer
 
-@dataclass
-class PIIMatch:
-    text: str
-    category: str
-    start: int
-    end: int
-    confidence: float
-
-PII_PATTERNS = {
-    "email": (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', 0.95),
-    "phone_us": (r'\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b', 0.85),
-    "ssn": (r'\b\d{3}-\d{2}-\d{4}\b', 0.90),
-    "credit_card": (r'\b(?:\d{4}[-\s]?){3}\d{4}\b', 0.85),
-    "ip_address": (r'\b(?:\d{1,3}\.){3}\d{1,3}\b', 0.70),
-}
-
-def detect_pii(text: str, patterns: dict = None) -> List[PIIMatch]:
-    """Scan text for PII patterns."""
-    patterns = patterns or PII_PATTERNS
-    matches = []
-    for category, (pattern, confidence) in patterns.items():
-        for match in re.finditer(pattern, text):
-            matches.append(PIIMatch(
-                text=match.group(), category=category,
-                start=match.start(), end=match.end(), confidence=confidence,
-            ))
-    return matches
-
-def mask_pii(text: str, replacement: str = "[REDACTED]") -> Tuple[str, List[PIIMatch]]:
-    """Detect and mask all PII in text."""
-    matches = detect_pii(text)
-    for m in sorted(matches, key=lambda x: x.start, reverse=True):
-        text = text[:m.start] + replacement + text[m.end:]
-    return text, matches
+masked_text, matches = PIIMasker().mask_text(raw_text)      # "[EMAIL]", "[SSN]", ...
+findings = PIIDetector().detect_in_columns(df)              # per-column report
+masked_df = PIIMasker().mask_dataframe(df, columns=["notes"])
 ```
+
+Two things to be honest about with any regex detector:
+
+- **Validate, do not just match.** A 16-digit run is not a card number. The detector applies a Luhn (mod-10) checksum to `credit_card` hits and drops failures, removing most order-ID and UUID false positives.
+- **Format matching is not compliance.** It cannot find names, addresses, or free-text identifiers, so it does not establish HIPAA Safe Harbor de-identification. Pair it with a named-entity system (Microsoft Presidio, AWS Comprehend / Comprehend Medical, GCP DLP) and treat regex as a fast pre-filter.
+- **Generalization is not k-anonymity.** Bucketing ages or truncating zips only coarsens values. Call `DataAnonymizer.verify_k_anonymity(df, quasi_identifiers, k)` (or `enforce_k_anonymity`) afterwards to confirm every equivalence class really has at least k records.
 
 See [REFERENCE.md](references/REFERENCE.md) for DataFrame anonymization, fairness/bias metrics, secure data handling patterns, and compliance requirements (GDPR, CCPA, HIPAA).
 
@@ -444,7 +451,7 @@ See [REFERENCE.md](references/REFERENCE.md) for DataFrame anonymization, fairnes
 
 ## 15-17. Fairness, Secure Data Handling, and Vulnerability Scanning
 
-These topics are documented in [REFERENCE.md](references/REFERENCE.md):
+These topics are documented in [REFERENCE.md](references/REFERENCE.md) sections 15-17:
 
 - **Fairness and Bias Auditing** — Group fairness metrics, disparate impact, demographic parity
 - **Secure Data Handling** — Encryption at rest/transit config, data access logging decorator

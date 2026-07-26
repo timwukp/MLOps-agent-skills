@@ -21,6 +21,8 @@ metadata:
 Guardrails protect LLM applications from producing harmful, inaccurate, or non-compliant
 outputs. They act as safety layers between users and the LLM.
 
+Tested with: `guardrails-ai>=0.10`, `nemoguardrails>=0.23`, `llm-guard>=0.3`, `openai>=1.0`.
+
 ## Guardrail Architecture
 
 ```
@@ -38,24 +40,30 @@ User Input → [Input Guardrails] → LLM → [Output Guardrails] → User Respo
 ### 1. Input Guardrails
 
 ```python
+import json
 import re
 from typing import Tuple
 
 class InputGuardrails:
     def __init__(self):
+        # Order matters for redaction: longest/most specific first, otherwise the
+        # phone pattern consumes 10 digits of a card number and leaks the rest.
         self.pii_patterns = {
-            "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-            "phone": r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
-            "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
             "credit_card": r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
+            "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+            "phone": r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
+            "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
         }
+        # Substring blocklist: a defence-in-depth supplement only. It is trivially
+        # bypassed by paraphrase, translation, or encoding. Always pair it with a
+        # trained detector (Prompt Guard 2, LLM Guard PromptInjection).
         self.jailbreak_patterns = [
             "ignore previous instructions",
             "ignore all instructions",
             "disregard your training",
             "pretend you are",
             "you are now",
-            "DAN mode",
+            "dan mode",
             "developer mode",
         ]
 
@@ -102,14 +110,17 @@ class InputGuardrails:
 class OutputGuardrails:
     def __init__(self, llm_judge=None):
         self.llm_judge = llm_judge
+        # Load the classifier once. Instantiating a transformers pipeline per call
+        # costs seconds and blows the <200ms guardrail latency budget.
+        from transformers import pipeline
+        self.toxicity_clf = pipeline("text-classification",
+                                     model="unitary/toxic-bert", truncation=True)
 
     def check_toxicity(self, text: str, threshold: float = 0.5) -> dict:
         """Check output for toxic content."""
-        # Using a lightweight classifier
-        from transformers import pipeline
-        classifier = pipeline("text-classification",
-                            model="unitary/toxic-bert", truncation=True)
-        result = classifier(text[:512])[0]
+        # truncation=True already caps at the model's token limit; the [:2000]
+        # char guard just avoids tokenizing an unbounded string.
+        result = self.toxicity_clf(text[:2000])[0]
         is_toxic = result["label"] == "toxic" and result["score"] > threshold
         return {"toxic": is_toxic, "score": result["score"]}
 
@@ -168,11 +179,12 @@ guard = Guard().use_many(
     ),
 )
 
-# Use with LLM
+# Use with LLM. Guardrails >=0.5 takes a LiteLLM-style model string plus
+# messages; the old llm_api=<callable> + prompt= form is removed.
 result = guard(
-    llm_api=openai.chat.completions.create,
-    prompt="Answer the customer question: {question}",
-    question=user_question,
+    model="gpt-5-mini",
+    messages=[{"role": "user",
+               "content": f"Answer the customer question: {user_question}"}],
 )
 
 if result.validation_passed:
@@ -183,12 +195,16 @@ else:
 
 ### 4. NeMo Guardrails
 
+NeMo Guardrails loads every `.yml`/`.co` file in the config directory; the main
+settings file must be named `config.yml` (not `rails.yaml`), and Colang flows
+live in sibling `.co` files.
+
 ```yaml
-# config/rails.yaml
+# config/config.yml
 models:
   - type: main
     engine: openai
-    model: gpt-4o
+    model: gpt-5-mini
 
 rails:
   input:
@@ -250,15 +266,20 @@ class GuardrailPipeline:
 
 ## Best Practices
 
-1. **Defense in depth** - Apply guardrails at both input and output
-2. **Fail safe** - When guardrails are uncertain, be conservative
-3. **Log all violations** for analysis and improvement
-4. **Red team regularly** - Test guardrails with adversarial inputs
-5. **Layer multiple checks** - No single guardrail catches everything
-6. **Keep guardrails fast** - Don't add > 200ms latency
-7. **Update patterns** - New jailbreak techniques emerge constantly
-8. **User-facing explanations** - Tell users why their request was blocked
-9. **Monitor false positive rate** - Too aggressive = bad UX
+1. **Separate trusted from untrusted text** - Put policy in the `system` role and
+   never concatenate user input or retrieved documents into it. Wrap untrusted
+   content in delimiters and tell the model that text inside them is data, not
+   instructions. This structural defense holds up better than any pattern list.
+2. **Defense in depth** - Apply guardrails at both input and output
+3. **Fail safe** - When guardrails are uncertain, be conservative
+4. **Log all violations** for analysis and improvement
+5. **Red team regularly** - Test guardrails with adversarial inputs
+6. **Layer multiple checks** - No single guardrail catches everything
+7. **Keep guardrails fast** - Don't add > 200ms latency (load classifiers once at
+   startup, not per request)
+8. **Update patterns** - New jailbreak techniques emerge constantly
+9. **User-facing explanations** - Tell users why their request was blocked
+10. **Monitor false positive rate** - Too aggressive = bad UX
 
 ## Scripts
 

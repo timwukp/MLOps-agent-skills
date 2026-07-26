@@ -32,7 +32,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logging.basicConfig(
@@ -248,10 +248,19 @@ def format_table(runs: List[Dict], metric: str, top_n: int) -> str:
     sep = "-" * len(header)
     lines = [sep, header, sep]
     for i, r in enumerate(sorted_runs, 1):
-        vals = "  ".join(f"{r['metrics'].get(m, 0):>14.5f}" for m in all_metrics)
+        vals = "  ".join(
+            f"{r['metrics'][m]:>14.5f}" if m in r["metrics"] else f"{'N/A':>14}"
+            for m in all_metrics)
         lines.append(f"{i:<4} {r['run_name']:<25} {r['status']:<10} {vals}")
     lines.append(sep)
     return "\n".join(lines)
+
+
+def _fmt(value: Any, spec: str = ".5f") -> str:
+    """Format a number, falling back to 'N/A' for missing values."""
+    if isinstance(value, (int, float)):
+        return format(value, spec)
+    return "N/A"
 
 
 def generate_markdown(runs: List[Dict], metric: str, top_n: int,
@@ -266,30 +275,37 @@ def generate_markdown(runs: List[Dict], metric: str, top_n: int,
     lines = [
         f"# Experiment Comparison Report",
         f"",
-        f"_Generated: {datetime.utcnow().isoformat()}_",
+        f"_Generated: {datetime.now(timezone.utc).isoformat()}_",
         f"",
+    ]
+
+    if "error" in stats:
+        lines.extend([f"**{stats['error']}**", ""])
+        return "\n".join(lines)
+
+    lines.extend([
         f"## Summary",
         f"",
         f"| Statistic | Value |",
         f"|-----------|-------|",
         f"| Metric | {stats.get('metric', metric)} |",
         f"| Runs analysed | {stats.get('count', len(runs))} |",
-        f"| Best | {stats.get('best', 'N/A'):.5f} |",
-        f"| Worst | {stats.get('worst', 'N/A'):.5f} |",
-        f"| Mean | {stats.get('mean', 'N/A'):.5f} |",
-        f"| Std | {stats.get('std', 'N/A'):.5f} |",
+        f"| Best | {_fmt(stats.get('best'))} |",
+        f"| Worst | {_fmt(stats.get('worst'))} |",
+        f"| Mean | {_fmt(stats.get('mean'))} |",
+        f"| Std | {_fmt(stats.get('std'))} |",
         f"| Best run | {stats.get('best_run_name', '')} (`{stats.get('best_run_id', '')[:8]}`) |",
         f"",
         f"## Top {top_n} Runs",
         f"",
-    ]
+    ])
 
     # Table header
     all_metrics = sorted({k for r in sorted_runs for k in r["metrics"]})
     lines.append("| # | Run Name | " + " | ".join(all_metrics) + " |")
     lines.append("|---|---------" + "".join("| ---:" for _ in all_metrics) + " |")
     for i, r in enumerate(sorted_runs, 1):
-        vals = " | ".join(f"{r['metrics'].get(m, 0):.5f}" for m in all_metrics)
+        vals = " | ".join(_fmt(r["metrics"].get(m)) for m in all_metrics)
         lines.append(f"| {i} | {r['run_name']} | {vals} |")
 
     # Parameter correlations
@@ -318,7 +334,7 @@ def generate_json_report(runs: List[Dict], metric: str, top_n: int,
     )[:top_n]
 
     report = {
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "statistics": stats,
         "top_runs": sorted_runs,
     }
@@ -331,7 +347,14 @@ def generate_json_report(runs: List[Dict], metric: str, top_n: int,
 
 def parallel_coordinates_plot(runs: List[Dict], metric: str,
                               output_path: str) -> bool:
-    """Create a parallel coordinates plot for hyperparameter search and save as PNG."""
+    """Create a parallel coordinates plot for hyperparameter search and save as PNG.
+
+    Notes:
+    - Candidate parameters are taken from the FIRST scored run; params that
+      only appear in later runs are not plotted.
+    - Rankings elsewhere in this tool assume higher metric = better; for
+      loss-like metrics interpret the colour scale accordingly.
+    """
     plt = _import_matplotlib()
     np = _import_numpy()
     if plt is None or np is None:

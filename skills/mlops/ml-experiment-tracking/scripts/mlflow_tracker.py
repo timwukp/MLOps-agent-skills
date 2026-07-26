@@ -36,7 +36,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logging.basicConfig(
@@ -104,7 +104,7 @@ def default_tags() -> Dict[str, str]:
     tags: Dict[str, str] = {
         "python_version": platform.python_version(),
         "os": platform.system(),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     git_hash = _get_git_hash()
     if git_hash:
@@ -195,21 +195,22 @@ class ExperimentTracker:
                 logger.warning("Could not infer signature: %s", exc)
 
         # Detect framework and log accordingly
+        # MLflow 3: positional artifact_path is deprecated; pass name= instead
         model_type = type(model).__module__.split(".")[0] if hasattr(type(model), "__module__") else ""
         try:
             if "sklearn" in model_type or "sklearn" in str(type(model)):
-                self.mlflow.sklearn.log_model(model, artifact_path,
+                self.mlflow.sklearn.log_model(model, name=artifact_path,
                                               signature=signature,
                                               input_example=input_example)
             elif "xgboost" in model_type:
-                self.mlflow.xgboost.log_model(model, artifact_path,
+                self.mlflow.xgboost.log_model(model, name=artifact_path,
                                               signature=signature,
                                               input_example=input_example)
             elif "torch" in model_type:
-                self.mlflow.pytorch.log_model(model, artifact_path)
+                self.mlflow.pytorch.log_model(model, name=artifact_path)
             else:
                 # Fallback: try sklearn flavour, then pickle
-                self.mlflow.sklearn.log_model(model, artifact_path,
+                self.mlflow.sklearn.log_model(model, name=artifact_path,
                                               signature=signature,
                                               input_example=input_example)
             logger.info("Logged model to '%s'", artifact_path)
@@ -341,7 +342,9 @@ class ExperimentTracker:
         sep = "-" * len(header)
         lines = [sep, header, sep]
         for r in runs:
-            vals = "  ".join(f"{r['metrics'].get(m, 0):>12.4f}" for m in all_metrics)
+            vals = "  ".join(
+                f"{r['metrics'][m]:>12.4f}" if m in r["metrics"] else f"{'N/A':>12}"
+                for m in all_metrics)
             lines.append(f"{r['run_name']:<25} {r['status']:<10} {vals}")
         lines.append(sep)
         return "\n".join(lines)
@@ -349,8 +352,14 @@ class ExperimentTracker:
     # -- cleanup -----------------------------------------------------------
 
     def cleanup(self, delete_failed: bool = True,
-                delete_unfinished: bool = True) -> int:
-        """Delete failed and/or unfinished runs. Returns count deleted."""
+                delete_unfinished: bool = False,
+                unfinished_min_age_hours: float = 24.0) -> int:
+        """Delete failed and (optionally) stale RUNNING runs. Returns count deleted.
+
+        RUNNING runs are only deleted when ``delete_unfinished=True`` AND the
+        run is older than ``unfinished_min_age_hours``, to avoid killing
+        experiments that are legitimately still in progress.
+        """
         exp_id = self.get_experiment_id()
         if exp_id is None:
             logger.error("Experiment '%s' not found", self.experiment_name)
@@ -362,6 +371,7 @@ class ExperimentTracker:
         if delete_unfinished:
             statuses.append("RUNNING")
 
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
         deleted = 0
         for status in statuses:
             runs = self.client.search_runs(
@@ -369,6 +379,12 @@ class ExperimentTracker:
                 filter_string=f"attributes.status = '{status}'",
             )
             for run in runs:
+                if status == "RUNNING":
+                    age_hours = (now_ms - (run.info.start_time or now_ms)) / 3.6e6
+                    if age_hours < unfinished_min_age_hours:
+                        logger.info("Skipping RUNNING run %s (only %.1fh old)",
+                                    run.info.run_id, age_hours)
+                        continue
                 self.client.delete_run(run.info.run_id)
                 deleted += 1
                 logger.info("Deleted run %s (%s)", run.info.run_id, status)
@@ -405,6 +421,9 @@ Examples:
                         help="Number of top runs to display (default: 10)")
     parser.add_argument("--json", action="store_true",
                         help="Output results as JSON")
+    parser.add_argument("--delete-running", action="store_true",
+                        help="Also delete stale RUNNING runs during cleanup "
+                             "(older than 24h)")
     return parser
 
 
@@ -443,7 +462,7 @@ def main() -> None:
             print(tracker.compare_runs(metric=args.metric, top_n=args.top_n))
 
     elif args.action == "cleanup":
-        count = tracker.cleanup()
+        count = tracker.cleanup(delete_unfinished=args.delete_running)
         if args.json:
             print(json.dumps({"deleted": count}))
         else:

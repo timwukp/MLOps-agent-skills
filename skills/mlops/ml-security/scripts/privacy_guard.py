@@ -114,8 +114,37 @@ PII_PATTERNS: Dict[str, Tuple[str, float, str]] = {
 }
 
 
+def luhn_valid(digits: str) -> bool:
+    """Luhn (mod-10) checksum used by payment card numbers."""
+    nums = [int(c) for c in digits if c.isdigit()]
+    if len(nums) < 12:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(nums)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
 class PIIDetector:
-    """Detect PII in text using configurable regex patterns."""
+    """
+    Detect PII in text using configurable regex patterns.
+
+    SCOPE: this is a format-based detector, not a compliance-grade classifier.
+    It matches shapes (and validates card checksums), so it cannot find names,
+    addresses, medical record numbers, or free-text identifiers. For HIPAA Safe
+    Harbor de-identification or GDPR-grade discovery, use a named-entity system
+    such as Microsoft Presidio, AWS Comprehend (DetectPiiEntities /
+    Comprehend Medical), or GCP DLP, and treat this scanner as a fast pre-filter.
+    """
+
+    # Extra validators applied after a regex hit; a False result drops the match.
+    VALIDATORS = {
+        "credit_card": luhn_valid,
+    }
 
     def __init__(self, patterns: Dict[str, Tuple[str, float, str]] = None,
                  min_confidence: float = 0.0):
@@ -128,7 +157,10 @@ class PIIDetector:
         for category, (pattern, confidence, _severity) in self.patterns.items():
             if confidence < self.min_confidence:
                 continue
+            validator = self.VALIDATORS.get(category)
             for match in re.finditer(pattern, text):
+                if validator and not validator(match.group()):
+                    continue  # e.g. 16-digit sequence that fails the Luhn check
                 matches.append(PIIMatch(
                     text=match.group(),
                     category=category,
@@ -230,17 +262,74 @@ class DataAnonymizer:
         h = hashlib.new(algorithm, salted)
         return h.hexdigest()[:truncate]
 
-    def k_anonymize_age(self, age: int, k: int = 5) -> str:
-        """Generalize age into k-width buckets for k-anonymity."""
-        lower = (age // k) * k
-        upper = lower + k - 1
+    def generalize_age(self, age: int, bucket_width: int = 5) -> str:
+        """
+        Generalize an age into fixed-width buckets.
+
+        NOTE: bucketing alone does NOT provide k-anonymity. It is only a
+        generalization step; k-anonymity is a property of the whole
+        quasi-identifier tuple in the released table. Use
+        ``verify_k_anonymity()`` after generalizing to check that every
+        equivalence class has at least k records, and suppress the classes
+        that do not.
+        """
+        lower = (age // bucket_width) * bucket_width
+        upper = lower + bucket_width - 1
         return f"{lower}-{upper}"
 
-    def k_anonymize_zip(self, zipcode: str, mask_digits: int = 2) -> str:
-        """Mask last N digits of a zip code."""
+    def generalize_zip(self, zipcode: str, mask_digits: int = 2) -> str:
+        """
+        Mask the last N digits of a zip code (generalization, not k-anonymity).
+
+        See ``generalize_age`` for why this must be paired with
+        ``verify_k_anonymity()``.
+        """
         if len(zipcode) <= mask_digits:
             return "*" * len(zipcode)
         return zipcode[:-mask_digits] + "*" * mask_digits
+
+    # Backwards-compatible aliases (the old names implied a guarantee they
+    # did not provide; kept so existing configs keep working).
+    k_anonymize_age = generalize_age
+    k_anonymize_zip = generalize_zip
+
+    def verify_k_anonymity(self, df, quasi_identifiers: List[str],
+                           k: int = 5) -> Dict[str, Any]:
+        """
+        Check whether a DataFrame satisfies k-anonymity over the given
+        quasi-identifier columns.
+
+        Returns a dict with the smallest equivalence-class size, the number of
+        violating classes, the number of affected rows, and a boolean
+        ``satisfied`` flag. This is the check that turns generalization into an
+        actual k-anonymity claim.
+        """
+        group_sizes = df.groupby(quasi_identifiers, dropna=False).size()
+        violating = group_sizes[group_sizes < k]
+        return {
+            "k": k,
+            "quasi_identifiers": list(quasi_identifiers),
+            "num_equivalence_classes": int(len(group_sizes)),
+            "min_class_size": int(group_sizes.min()) if len(group_sizes) else 0,
+            "violating_classes": int(len(violating)),
+            "rows_in_violating_classes": int(violating.sum()) if len(violating) else 0,
+            "satisfied": bool(len(violating) == 0),
+        }
+
+    def enforce_k_anonymity(self, df, quasi_identifiers: List[str], k: int = 5):
+        """
+        Drop rows whose quasi-identifier combination occurs fewer than k times,
+        so the returned DataFrame satisfies k-anonymity by construction.
+        """
+        group_sizes = df.groupby(quasi_identifiers, dropna=False)[
+            quasi_identifiers[0]
+        ].transform("size")
+        dropped = int((group_sizes < k).sum())
+        if dropped:
+            logger.warning(
+                f"Suppressing {dropped} row(s) in equivalence classes smaller than k={k}"
+            )
+        return df[group_sizes >= k].copy()
 
     def suppress(self, value: Any, threshold: int = None,
                  group_counts: Dict = None) -> Any:
@@ -257,11 +346,15 @@ class DataAnonymizer:
         Config format:
             {
                 "column_name": {
-                    "method": "hash" | "mask_pii" | "k_anonymize_age" | "k_anonymize_zip" |
+                    "method": "hash" | "mask_pii" | "generalize_age" | "generalize_zip" |
                               "suppress" | "drop",
                     "params": { ... }  # method-specific parameters
                 }
             }
+
+        The generalize_* methods only coarsen values. To claim k-anonymity for
+        the released table, follow up with ``verify_k_anonymity()`` /
+        ``enforce_k_anonymity()`` over the full quasi-identifier set.
         """
         import pandas as pd
         df = df.copy()
@@ -281,16 +374,16 @@ class DataAnonymizer:
                 df[col] = df[col].apply(
                     lambda x: masker.mask_text(str(x))[0] if pd.notna(x) else x
                 )
-            elif method == "k_anonymize_age":
-                k = params.get("k", 5)
+            elif method in ("generalize_age", "k_anonymize_age"):
+                bucket_width = params.get("bucket_width", params.get("k", 5))
                 df[col] = df[col].apply(
-                    lambda x: self.k_anonymize_age(int(x), k)
+                    lambda x: self.generalize_age(int(x), bucket_width)
                     if pd.notna(x) else x
                 )
-            elif method == "k_anonymize_zip":
+            elif method in ("generalize_zip", "k_anonymize_zip"):
                 mask_digits = params.get("mask_digits", 2)
                 df[col] = df[col].apply(
-                    lambda x: self.k_anonymize_zip(str(x), mask_digits)
+                    lambda x: self.generalize_zip(str(x), mask_digits)
                     if pd.notna(x) else x
                 )
             elif method == "suppress":
@@ -327,32 +420,51 @@ class PrivacyBudget:
     """Track cumulative privacy budget across operations."""
     total_epsilon_budget: float
     total_delta_budget: float
-    composition_method: str = "basic"  # "basic", "advanced", "rdp"
+    # "basic" (sum) or "advanced" (advanced composition theorem). RDP/zCDP
+    # accounting is NOT implemented here: a tight RDP bound needs the
+    # per-mechanism noise multiplier, sampling rate, and step count, which a
+    # budget ledger of (eps, delta) pairs does not carry. Use
+    # opacus.accountants.RDPAccountant (or TF Privacy) alongside the trainer
+    # and record the resulting epsilon here as a "basic" expenditure.
+    composition_method: str = "basic"
     expenditures: List[PrivacyExpenditure] = field(default_factory=list)
 
     @property
     def epsilon_spent(self) -> float:
-        """Compute total epsilon spent based on composition method."""
+        """
+        Compute total epsilon spent based on the composition method.
+
+        Both supported methods are conservative (never under-report), so a
+        budget check can fail closed.
+        """
         epsilons = [e.epsilon for e in self.expenditures]
         if not epsilons:
             return 0.0
-        if self.composition_method == "basic":
-            # Basic composition: sum of epsilons
-            return sum(epsilons)
-        elif self.composition_method == "advanced":
-            # Advanced composition theorem
-            k = len(epsilons)
-            max_eps = max(epsilons)
-            sum_eps_sq = sum(e ** 2 for e in epsilons)
-            return min(
-                sum(epsilons),
-                math.sqrt(2 * k * math.log(1 / self.total_delta_budget)) * max_eps
-                + k * max_eps * (math.exp(max_eps) - 1),
+        if self.composition_method == "advanced":
+            # Advanced composition theorem (Dwork-Rothblum-Vadhan). Requires a
+            # positive slack delta; fall back to basic composition otherwise.
+            if self.total_delta_budget and self.total_delta_budget > 0:
+                k = len(epsilons)
+                max_eps = max(epsilons)
+                return min(
+                    sum(epsilons),
+                    math.sqrt(2 * k * math.log(1.0 / self.total_delta_budget)) * max_eps
+                    + k * max_eps * (math.exp(max_eps) - 1),
+                )
+            logger.warning(
+                "Advanced composition needs total_delta_budget > 0; "
+                "falling back to basic (sum) composition."
             )
-        elif self.composition_method == "rdp":
-            # Simplified RDP: tighter than basic, looser than full RDP accounting
-            # Full RDP requires per-mechanism alpha parameters
-            return sum(epsilons) * 0.7  # Rough approximation
+            return sum(epsilons)
+        if self.composition_method not in ("basic", "advanced"):
+            # Fail closed: never report a smaller epsilon than basic composition
+            # just because an unimplemented accountant was requested.
+            logger.warning(
+                f"composition_method='{self.composition_method}' is not implemented; "
+                "using basic (sum) composition. For RDP/zCDP accounting use "
+                "opacus.accountants.RDPAccountant and record its epsilon here."
+            )
+        # Basic composition: sum of epsilons
         return sum(epsilons)
 
     @property
@@ -644,6 +756,7 @@ def run_privacy_audit(data_path: str = None, budget_path: str = None,
         data_path=data_path,
     )
     recommendations = []
+    scan_failed = False
 
     # 1. PII Detection
     if data_path and Path(data_path).exists():
@@ -657,7 +770,14 @@ def run_privacy_audit(data_path: str = None, budget_path: str = None,
                 if len(df) > 10000:
                     df = df.head(10000)
             elif ext in {".json", ".jsonl"}:
-                df = pd.read_json(data_path, lines=(ext == ".jsonl"), nrows=10000)
+                # pandas only accepts nrows for line-delimited JSON; a plain
+                # .json array must be read whole and then truncated.
+                if ext == ".jsonl":
+                    df = pd.read_json(data_path, lines=True, nrows=10000)
+                else:
+                    df = pd.read_json(data_path)
+                    if len(df) > 10000:
+                        df = df.head(10000)
             else:
                 df = None
 
@@ -699,7 +819,13 @@ def run_privacy_audit(data_path: str = None, budget_path: str = None,
                 "Install pandas for structured data PII scanning: pip install pandas"
             )
         except Exception as e:
+            # Do not let a read failure look like "no PII found".
             logger.warning(f"PII scan error: {e}")
+            scan_failed = True
+            recommendations.append(
+                f"ERROR: PII scan of '{data_path}' failed ({e}). "
+                "Treat the dataset as unscanned, not as PII-free."
+            )
 
     # 2. Privacy Budget Assessment
     if budget_path and Path(budget_path).exists():
@@ -738,7 +864,7 @@ def run_privacy_audit(data_path: str = None, budget_path: str = None,
             )
 
     # 4. General recommendations
-    if not report.pii_findings:
+    if not report.pii_findings and not scan_failed:
         recommendations.append("No PII detected, but consider manual review for domain-specific PII.")
     recommendations.append("Ensure all data is encrypted at rest and in transit.")
     recommendations.append("Implement access logging for all data access operations.")
@@ -761,6 +887,9 @@ def run_privacy_audit(data_path: str = None, budget_path: str = None,
         report.risk_level = "high"
     elif report.pii_findings:
         report.risk_level = "medium"
+    elif scan_failed:
+        # Unscanned is not the same as clean.
+        report.risk_level = "unknown"
     else:
         report.risk_level = "low"
 
@@ -904,9 +1033,12 @@ def cmd_dp_train(args):
             budget = PrivacyBudget.load(args.budget)
             logger.info(f"Loaded privacy budget from {args.budget}")
         else:
+            # Default budget headroom: allow a second run at the same target
+            # epsilon, and a total delta equal to the per-run delta (single
+            # planned expenditure) unless the caller overrides it.
             budget = PrivacyBudget(
                 total_epsilon_budget=args.total_epsilon or args.epsilon * 2,
-                total_delta_budget=args.delta * 10,
+                total_delta_budget=args.total_delta or args.delta,
                 composition_method="advanced",
             )
             logger.info("Created new privacy budget.")
@@ -984,6 +1116,8 @@ def parse_args(argv=None):
                       help="Target epsilon (default: 8.0)")
     p_dp.add_argument("--delta", type=float, default=1e-5, help="Target delta (default: 1e-5)")
     p_dp.add_argument("--total-epsilon", type=float, help="Total epsilon budget")
+    p_dp.add_argument("--total-delta", type=float,
+                      help="Total delta budget (default: same as --delta)")
     p_dp.add_argument("--epochs", type=int, default=10, help="Number of epochs (default: 10)")
     p_dp.add_argument("--batch-size", type=int, default=64, help="Batch size (default: 64)")
     p_dp.add_argument("--max-grad-norm", type=float, default=1.0,

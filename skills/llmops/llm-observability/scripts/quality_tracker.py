@@ -3,7 +3,7 @@
 
 Usage:
     python quality_tracker.py --action log-feedback --request-id abc123 --rating 5 --feedback "Great"
-    python quality_tracker.py --action stats --period 7d --model-filter gpt-4o
+    python quality_tracker.py --action stats --period 7d --model-filter gpt-5-mini
     python quality_tracker.py --action compare --variant-a v1-prompt --variant-b v2-prompt
     python quality_tracker.py --action export --period 30d --output report.json
 """
@@ -106,8 +106,16 @@ class QualityTracker:
                 "recent_avg": round(recent["avg"], 2), "drop": round(drop, 2),
                 "threshold": threshold, "baseline_n": baseline["n"], "recent_n": recent["n"]}
 
-    def compare_variants(self, variant_a, variant_b, period="30d"):
-        """Compare quality metrics between two prompt/model variants."""
+    def compare_variants(self, variant_a, variant_b, period="30d",
+                         min_sample=30, min_effect=0.2):
+        """Compare quality metrics between two prompt/model variants.
+
+        This is a descriptive comparison, not a significance test. A winner is
+        only declared when both arms have at least `min_sample` ratings and the
+        gap exceeds `min_effect`; otherwise the result is "tie" (gap too small)
+        or None (not enough data). For a real ship/no-ship decision run a t-test
+        or bootstrap CI on the raw ratings from export_report().
+        """
         cutoff = self._cutoff(period)
 
         def _stats(v):
@@ -121,10 +129,18 @@ class QualityTracker:
                     "satisfaction_pct": round(r["pos"] / tt * 100, 2) if tt else None}
 
         a, b = _stats(variant_a), _stats(variant_b)
-        winner = None
-        if a["count"] >= 5 and b["count"] >= 5:
-            winner = variant_a if a["avg_rating"] > b["avg_rating"] else variant_b
-        return {"variant_a": a, "variant_b": b, "winner": winner, "period": period}
+        diff = a["avg_rating"] - b["avg_rating"]
+        winner, note = None, ""
+        if a["count"] < min_sample or b["count"] < min_sample:
+            note = (f"Underpowered: need >={min_sample} ratings per variant "
+                    f"(have {a['count']} vs {b['count']})")
+        elif abs(diff) < min_effect:
+            winner, note = "tie", f"Difference {abs(diff):.2f} below min_effect {min_effect}"
+        else:
+            winner = variant_a if diff > 0 else variant_b
+            note = "Descriptive winner only - confirm with a significance test"
+        return {"variant_a": a, "variant_b": b, "winner": winner,
+                "rating_diff": round(diff, 2), "note": note, "period": period}
 
     def export_report(self, period="30d", fmt="json"):
         """Export quality report as JSON or CSV."""

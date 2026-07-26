@@ -49,10 +49,12 @@ User Query
 ### 1. Document Loading and Parsing
 
 ```python
+from datetime import datetime, timezone
+
 from langchain_community.document_loaders import (
     PyPDFLoader, TextLoader, CSVLoader, UnstructuredHTMLLoader
 )
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Load documents
 loaders = [
@@ -68,7 +70,7 @@ for loader in loaders:
 # Add metadata
 for doc in documents:
     doc.metadata["source_type"] = doc.metadata.get("source", "").split(".")[-1]
-    doc.metadata["ingested_at"] = datetime.utcnow().isoformat()
+    doc.metadata["ingested_at"] = datetime.now(timezone.utc).isoformat()
 ```
 
 ### 2. Chunking Strategies
@@ -110,7 +112,7 @@ semantic_chunks = semantic_splitter.split_documents(documents)
 
 ```python
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from sentence_transformers import SentenceTransformer
 
 # OpenAI embeddings
@@ -180,12 +182,12 @@ reranked = rerank(query, initial_results, top_k=5)
 
 ```python
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
 # LLM
-llm = ChatOpenAI(model="gpt-4o", temperature=0)
+llm = ChatOpenAI(model="gpt-5-mini", temperature=0)
 
 # RAG prompt
 rag_prompt = ChatPromptTemplate.from_template("""Answer the question based only on the provided context.
@@ -215,21 +217,24 @@ answer = rag_chain.invoke("What is the return policy?")
 ### 7. Query Transformation
 
 ```python
+import json
+
 def transform_query(original_query, llm):
     """Improve retrieval by transforming the query."""
+    # Note: chat models return an AIMessage; use .content for the text
 
     # HyDE: Generate hypothetical answer, then search for similar
     hyde_prompt = f"Write a short passage that would answer: {original_query}"
-    hypothetical_answer = llm.invoke(hyde_prompt)
+    hypothetical_answer = llm.invoke(hyde_prompt).content
 
     # Multi-query: Generate multiple search queries
     multi_prompt = f"""Generate 3 different search queries for: {original_query}
     Return as a JSON list of strings."""
-    queries = json.loads(llm.invoke(multi_prompt))
+    queries = json.loads(llm.invoke(multi_prompt).content)
 
     # Step-back: Abstract the question
     stepback_prompt = f"What is a more general question that would help answer: {original_query}"
-    general_query = llm.invoke(stepback_prompt)
+    general_query = llm.invoke(stepback_prompt).content
 
     return {
         "original": original_query,
@@ -255,7 +260,7 @@ def transform_query(original_query, llm):
 ## Scripts
 
 - `scripts/build_rag.py` - End-to-end RAG pipeline builder
-- `scripts/evaluate_rag.py` - RAG evaluation with RAGAS
+- `scripts/evaluate_rag.py` - RAG evaluation with built-in retrieval/generation metrics (Recall@K, MRR, NDCG, F1, faithfulness)
 
 ## References
 

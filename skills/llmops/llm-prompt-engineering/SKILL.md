@@ -115,8 +115,8 @@ class SentimentResult(BaseModel):
     key_phrases: list[str]
 
 client = OpenAI()
-response = client.beta.chat.completions.parse(
-    model="gpt-4o",
+response = client.chat.completions.parse(
+    model="gpt-5-mini",
     messages=[
         {"role": "system", "content": "Analyze sentiment. Return structured JSON."},
         {"role": "user", "content": "The product is amazing but shipping was slow."},
@@ -131,6 +131,7 @@ print(f"Sentiment: {result.sentiment}, Confidence: {result.confidence}")
 ### 6. Prompt Template System
 
 ```python
+from pathlib import Path
 from string import Template
 import yaml
 
@@ -140,8 +141,16 @@ class PromptManager:
         self.cache = {}
 
     def load(self, name, version="latest"):
-        """Load a versioned prompt template."""
-        path = f"{self.prompts_dir}/{name}/v{version}.yaml"
+        """Load a versioned prompt template. version='latest' picks the highest vN.yaml."""
+        prompt_dir = Path(self.prompts_dir) / name
+        if version == "latest":
+            versions = sorted(prompt_dir.glob("v*.yaml"),
+                              key=lambda p: int(p.stem[1:]))
+            if not versions:
+                raise FileNotFoundError(f"No prompt versions found in {prompt_dir}")
+            path = versions[-1]
+        else:
+            path = prompt_dir / f"v{version}.yaml"
         with open(path) as f:
             config = yaml.safe_load(f)
         return config
@@ -156,7 +165,7 @@ class PromptManager:
             "metadata": {
                 "name": name,
                 "version": version,
-                "model": config.get("model", "gpt-4o"),
+                "model": config.get("model", "gpt-5-mini"),
                 "temperature": config.get("temperature", 0.7),
             },
         }
@@ -166,7 +175,7 @@ class PromptManager:
 # prompts/sentiment/v1.yaml
 name: sentiment-classifier
 version: 1
-model: gpt-4o
+model: gpt-5-mini
 temperature: 0.0
 system: |
   You are a sentiment analysis expert. Analyze the given text and classify
@@ -182,9 +191,12 @@ template: |
 ### 7. Prompt Injection Defense
 
 ```python
+import re
+
 def sanitize_user_input(user_input):
     """Basic prompt injection defense."""
-    # Remove common injection patterns
+    # Remove common injection patterns (case-insensitive so Title Case
+    # or MiXeD cAsE variants can't bypass the filter)
     dangerous_patterns = [
         "ignore previous instructions",
         "ignore all instructions",
@@ -196,8 +208,7 @@ def sanitize_user_input(user_input):
     ]
     sanitized = user_input
     for pattern in dangerous_patterns:
-        sanitized = sanitized.replace(pattern.lower(), "[FILTERED]")
-        sanitized = sanitized.replace(pattern.upper(), "[FILTERED]")
+        sanitized = re.sub(re.escape(pattern), "[FILTERED]", sanitized, flags=re.IGNORECASE)
 
     return sanitized
 
@@ -220,7 +231,7 @@ IMPORTANT SECURITY RULES:
 ### 8. Prompt Optimization
 
 ```python
-def optimize_prompt_length(prompt, model="gpt-4o", max_tokens=None):
+def optimize_prompt_length(prompt, model="gpt-5-mini", max_tokens=None):
     """Compress prompt while maintaining quality."""
     import tiktoken
     enc = tiktoken.encoding_for_model(model)

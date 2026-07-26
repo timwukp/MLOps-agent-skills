@@ -15,7 +15,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -90,25 +90,27 @@ class StreamingIngester:
 
     def send_to_dlq(self, raw_message, error_reason):
         """Send failed message to dead letter queue."""
-        dlq_file = self.dlq_dir / f"dlq_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        now = datetime.now(timezone.utc)
+        dlq_file = self.dlq_dir / f"dlq_{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
         record = {
             "raw": raw_message.decode("utf-8", errors="replace") if raw_message else "",
             "error": error_reason,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": now.isoformat(),
         }
         with open(dlq_file, "a") as f:
             f.write(json.dumps(record) + "\n")
         self.stats["dlq"] += 1
 
-    def flush_batch(self):
-        """Write accumulated batch to Parquet."""
+    def flush_batch(self, consumer=None):
+        """Write accumulated batch to Parquet, then commit offsets."""
         if not self.batch:
+            self.last_flush = time.time()
             return
 
         import pandas as pd
 
         df = pd.DataFrame(self.batch)
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         output_path = self.output_dir / f"batch_{timestamp}.parquet"
         df.to_parquet(output_path, compression="snappy", index=False)
 
@@ -116,6 +118,10 @@ class StreamingIngester:
         logger.info(f"Flushed {len(self.batch)} records to {output_path}")
         self.batch = []
         self.last_flush = time.time()
+
+        # Commit only after a successful write (at-least-once semantics)
+        if consumer is not None:
+            consumer.commit()
 
     def should_flush(self):
         """Check if we should flush the current batch."""
@@ -137,7 +143,7 @@ class StreamingIngester:
 
                 if msg is None:
                     if self.should_flush():
-                        self.flush_batch()
+                        self.flush_batch(consumer)
                     continue
 
                 if msg.error():
@@ -154,8 +160,7 @@ class StreamingIngester:
                     self.stats["consumed"] += 1
 
                 if self.should_flush():
-                    self.flush_batch()
-                    consumer.commit()
+                    self.flush_batch(consumer)
 
         except Exception as e:
             logger.error(f"Fatal error: {e}")
@@ -163,8 +168,7 @@ class StreamingIngester:
         finally:
             # Flush remaining records
             if self.batch:
-                self.flush_batch()
-                consumer.commit()
+                self.flush_batch(consumer)
             consumer.close()
             logger.info(f"Shutdown complete. Stats: {json.dumps(self.stats)}")
 

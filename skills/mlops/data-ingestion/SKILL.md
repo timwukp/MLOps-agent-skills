@@ -98,8 +98,12 @@ df = pd.read_sql(
 ```python
 def incremental_load(source, watermark_col, last_watermark, target_path):
     """Load only new/changed records since last watermark."""
-    query = f"SELECT * FROM {source} WHERE {watermark_col} > '{last_watermark}'"
-    new_data = pd.read_sql(query, engine)
+    from sqlalchemy import text
+
+    # Identifiers (table/column) must come from trusted config;
+    # the watermark VALUE is passed as a bound parameter (no SQL injection).
+    query = text(f"SELECT * FROM {source} WHERE {watermark_col} > :watermark")
+    new_data = pd.read_sql(query, engine, params={"watermark": last_watermark})
 
     if len(new_data) > 0:
         # Append to existing dataset
@@ -127,7 +131,7 @@ conf = {
     "bootstrap.servers": "localhost:9092",
     "group.id": "ml-feature-consumer",
     "auto.offset.reset": "earliest",
-    "enable.auto.commit": False,  # Manual commit for exactly-once
+    "enable.auto.commit": False,  # Commit after write = at-least-once; pair with idempotent writes
 }
 
 consumer = Consumer(conf)
@@ -158,12 +162,16 @@ while True:
 #### Delta Lake
 
 ```python
-from delta import DeltaTable
+from delta import DeltaTable, configure_spark_with_delta_pip
 from pyspark.sql import SparkSession
 
-spark = SparkSession.builder \
-    .config("spark.jars.packages", "io.delta:delta-spark_2.12:3.1.0") \
-    .getOrCreate()
+builder = SparkSession.builder \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+
+# configure_spark_with_delta_pip adds the JARs matching your installed delta-spark version
+spark = configure_spark_with_delta_pip(builder).getOrCreate()
 
 # Write with ACID transactions
 df.write.format("delta") \
@@ -183,6 +191,8 @@ delta_table.alias("target").merge(
 
 ```python
 # Iceberg with PySpark
+from pyspark.sql.functions import days
+
 df.writeTo("catalog.db.features") \
     .using("iceberg") \
     .partitionedBy(days("timestamp")) \
@@ -211,26 +221,20 @@ git tag -a "data-v1.0" -m "Initial training dataset"
 #### LakeFS
 
 ```python
-import lakefs_client
-from lakefs_client.api import branches_api, objects_api
+import lakefs  # high-level SDK (replaces deprecated lakefs_client)
+
+repo = lakefs.repository("ml-data")
 
 # Create branch for new data version
-branches_api.create_branch(
-    repository="ml-data",
-    branch_creation={"name": "new-features", "source": "main"}
-)
+branch = repo.branch("new-features").create(source_reference="main")
 
 # Upload data
-objects_api.upload_object(
-    repository="ml-data",
-    branch="new-features",
-    path="features/v2/data.parquet",
-    content=open("data.parquet", "rb")
-)
+with open("data.parquet", "rb") as f:
+    branch.object("features/v2/data.parquet").upload(data=f.read(), mode="wb")
 
-# Commit and merge
-commits_api.commit(repository="ml-data", branch="new-features",
-                   commit_creation={"message": "Add new features"})
+# Commit and merge back to main
+branch.commit(message="Add new features")
+branch.merge_into(repo.branch("main"))
 ```
 
 ### 5. Schema Evolution

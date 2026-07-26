@@ -23,7 +23,7 @@
 
 ---
 
-## Great Expectations Suite Setup and Checkpoint Configuration
+## Great Expectations Suite Setup and Checkpoint Configuration (GX 1.x)
 
 ### Define an Expectation Suite
 
@@ -31,7 +31,7 @@
 import great_expectations as gx
 
 context = gx.get_context()
-suite = context.add_expectation_suite(expectation_suite_name="orders_suite")
+suite = context.suites.add(gx.ExpectationSuite(name="orders_suite"))
 
 suite.add_expectation(
     gx.expectations.ExpectColumnValuesToNotBeNull(column="order_id")
@@ -44,33 +44,35 @@ suite.add_expectation(
 suite.add_expectation(
     gx.expectations.ExpectColumnValuesToBeUnique(column="order_id")
 )
-context.save_expectation_suite(suite)
 ```
 
 ### Configure and Run a Checkpoint
 
-```yaml
-# great_expectations/checkpoints/orders_checkpoint.yml
-name: orders_checkpoint
-config_version: 1.0
-class_name: Checkpoint
-validations:
-  - batch_request:
-      datasource_name: my_datasource
-      data_connector_name: default_inferred_data_connector
-      data_asset_name: orders
-    expectation_suite_name: orders_suite
-action_list:
-  - name: store_validation_result
-    action:
-      class_name: StoreValidationResultAction
-  - name: update_data_docs
-    action:
-      class_name: UpdateDataDocsAction
-```
-
 ```python
-result = context.run_checkpoint(checkpoint_name="orders_checkpoint")
+# Data source -> asset -> batch definition
+datasource = context.data_sources.add_pandas("my_datasource")
+asset = datasource.add_dataframe_asset("orders")
+batch_definition = asset.add_batch_definition_whole_dataframe("orders_batch")
+
+# Bind suite + batch definition into a validation definition
+validation_definition = context.validation_definitions.add(
+    gx.ValidationDefinition(
+        name="orders_validation",
+        data=batch_definition,
+        suite=suite,
+    )
+)
+
+# Checkpoint wraps validation definitions plus post-run actions
+checkpoint = context.checkpoints.add(
+    gx.Checkpoint(
+        name="orders_checkpoint",
+        validation_definitions=[validation_definition],
+        actions=[gx.checkpoint.UpdateDataDocsAction(name="update_data_docs")],
+    )
+)
+
+result = checkpoint.run(batch_parameters={"dataframe": df})
 assert result.success, "Data validation failed!"
 ```
 
@@ -81,7 +83,7 @@ assert result.success, "Data validation failed!"
 ### Class-Based Schema (Recommended)
 
 ```python
-import pandera as pa
+import pandera.pandas as pa  # pandas-specific namespace (pandera 0.20+)
 from pandera.typing import Series, DataFrame
 
 class OrderSchema(pa.DataFrameModel):
@@ -133,18 +135,29 @@ A **data contract** is a formal agreement between a data producer and consumer s
 
 ## Integration with Airflow and Prefect
 
-### Airflow: Great Expectations Operator
+### Airflow: Great Expectations Operators (provider 1.0+)
 
 ```python
-from great_expectations_provider.operators.great_expectations import (
-    GreatExpectationsOperator,
+# GreatExpectationsOperator is legacy (provider <1.0). Provider 1.0+ ships
+# GX 1.x-native operators:
+from great_expectations_provider.operators.validate_checkpoint import (
+    GXValidateCheckpointOperator,
+)
+from great_expectations_provider.operators.validate_dataframe import (
+    GXValidateDataFrameOperator,
 )
 
-validate_task = GreatExpectationsOperator(
+# Run a pre-configured checkpoint
+validate_task = GXValidateCheckpointOperator(
     task_id="validate_orders",
-    data_context_root_dir="/opt/airflow/great_expectations",
-    checkpoint_name="orders_checkpoint",
-    fail_task_on_validation_failure=True,
+    configure_checkpoint=configure_checkpoint,  # callable returning a gx.Checkpoint
+)
+
+# Or validate an in-memory DataFrame directly
+validate_df_task = GXValidateDataFrameOperator(
+    task_id="validate_orders_df",
+    configure_dataframe=get_orders_df,  # callable returning a DataFrame
+    expect=orders_suite,                # gx.ExpectationSuite or single expectation
 )
 # DAG: extract >> validate_task >> transform >> load
 ```

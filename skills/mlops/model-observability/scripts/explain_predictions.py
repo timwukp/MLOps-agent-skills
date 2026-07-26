@@ -36,7 +36,18 @@ def load_model(model_path, framework):
         return lgb.Booster(model_file=model_path)
     if framework == "pytorch":
         import torch
-        model = torch.load(model_path, map_location="cpu"); model.eval()
+        # PyTorch >= 2.6 defaults to weights_only=True, which cannot unpickle a
+        # whole nn.Module. Explaining a model needs a callable module, so this
+        # path requires the full pickle. Only do it for artifacts you trust —
+        # unpickling executes code from the file. The safer pattern is to save a
+        # state_dict and load it into a locally-constructed architecture.
+        model = torch.load(model_path, map_location="cpu", weights_only=False)
+        if isinstance(model, dict):
+            raise ValueError(
+                f"'{model_path}' contains a state_dict, not a module. Construct the "
+                "architecture in code and call load_state_dict() before explaining."
+            )
+        model.eval()
         return model
     raise ValueError(f"Unsupported framework: {framework}")
 
@@ -75,6 +86,28 @@ def _pick_shap_explainer(model, framework, background):
     return shap.KernelExplainer(get_predict_fn(model, framework), background)
 
 
+def _normalize_shap_values(shap_values, positive_class=1):
+    """
+    Reduce SHAP output to a 2-D (n_samples, n_features) array.
+
+    SHAP < 0.45 returned a list of per-class arrays for classifiers; SHAP >= 0.45
+    returns a single ndarray with a trailing class axis, shape
+    (n_samples, n_features, n_classes). A list-only guard silently keeps the 3-D
+    array, and np.abs(...).mean(axis=0) then produces a (n_features, n_classes)
+    matrix that gets zipped against feature names — wrong importances.
+    """
+    sv = shap_values
+    if isinstance(sv, list):
+        # Legacy list-of-arrays: pick the positive class for binary, else class 0.
+        sv = sv[positive_class] if len(sv) == 2 else sv[0]
+    sv = np.asarray(sv)
+    if sv.ndim == 3:
+        # (n_samples, n_features, n_classes)
+        idx = positive_class if sv.shape[-1] > positive_class else 0
+        sv = sv[..., idx]
+    return sv
+
+
 def compute_shap(model, framework, X, feature_names, output_dir, index=None):
     """Compute SHAP values and save global/local results."""
     import shap
@@ -86,7 +119,12 @@ def compute_shap(model, framework, X, feature_names, output_dir, index=None):
     shap_values = explainer.shap_values(X.values)
     logger.info(f"SHAP values computed in {time.time() - t0:.1f}s")
 
-    sv = shap_values[1] if isinstance(shap_values, list) and len(shap_values) == 2 else shap_values
+    sv = _normalize_shap_values(shap_values)
+    if sv.shape[1] != len(feature_names):
+        logger.warning(
+            f"SHAP value width {sv.shape[1]} != {len(feature_names)} feature names; "
+            "importances may be misaligned."
+        )
     global_imp = dict(zip(feature_names, np.abs(sv).mean(axis=0).tolist()))
     global_imp = dict(sorted(global_imp.items(), key=lambda kv: kv[1], reverse=True))
     result = {"method": "shap", "global_feature_importance": global_imp}
@@ -95,6 +133,9 @@ def compute_shap(model, framework, X, feature_names, output_dir, index=None):
     try:
         import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        # shap.summary_plot is the legacy API kept for compatibility with the
+        # raw-array inputs used here. With modern Explainer objects prefer
+        # shap.plots.beeswarm(explanation) / shap.plots.bar(explanation).
         shap.summary_plot(sv, X, feature_names=feature_names, show=False)
         plt.savefig(os.path.join(output_dir, "shap_summary.png"), bbox_inches="tight", dpi=150)
         plt.close()
@@ -129,10 +170,15 @@ def compute_lime(model, framework, X, feature_names, output_dir, index=0):
 
     logger.info(f"Computing LIME explanation for index {index} ...")
     exp = explainer.explain_instance(X.values[index], predict_fn, num_features=len(feature_names))
+    # exp.intercept is a dict keyed by the explained label (e.g. {1: 0.42}), not a
+    # list — exp.intercept[0]/len() raise KeyError/TypeError. Read the label that
+    # LIME actually explained.
+    label = exp.available_labels()[0] if exp.available_labels() else next(iter(exp.intercept))
     result = {
         "method": "lime", "index": index,
-        "intercept": float(exp.intercept[1] if len(exp.intercept) > 1 else exp.intercept[0]),
-        "local_weights": {f: w for f, w in exp.as_list()},
+        "explained_label": int(label) if isinstance(label, (int, np.integer)) else str(label),
+        "intercept": float(exp.intercept[label]),
+        "local_weights": {f: w for f, w in exp.as_list(label=label)},
         "prediction_local": float(exp.local_pred[0]) if hasattr(exp, "local_pred") else None,
         "r2_score": float(exp.score) if hasattr(exp, "score") else None,
     }
@@ -158,12 +204,10 @@ def fairness_analysis(model, framework, X, feature_names, demographic_col, outpu
     explain_features = [f for f in feature_names if f != demographic_col]
     background = X_explain.values[:min(100, len(X))]
     explainer = _pick_shap_explainer(model, framework, background)
-    sv = explainer.shap_values(X_explain.values)
-    if isinstance(sv, list) and len(sv) == 2:
-        sv = sv[1]
+    sv = _normalize_shap_values(explainer.shap_values(X_explain.values))
     group_importance = {}
     for g in X[demographic_col].unique():
-        mask = X[demographic_col] == g
+        mask = (X[demographic_col] == g).to_numpy()
         group_importance[str(g)] = dict(zip(explain_features, np.abs(sv[mask]).mean(axis=0).tolist()))
     result = {"demographic_column": demographic_col, "group_mean_abs_shap": group_importance}
     path = os.path.join(output_dir, "fairness_shap.json")

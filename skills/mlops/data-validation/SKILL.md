@@ -78,8 +78,8 @@ if not results.success:
 ### 2. Pandera Schema Validation
 
 ```python
-import pandera as pa
-from pandera import Column, Check, DataFrameSchema
+import pandera.pandas as pa  # pandas-specific namespace (pandera 0.20+)
+from pandera.pandas import Column, Check, DataFrameSchema
 
 # Define schema
 schema = DataFrameSchema({
@@ -192,7 +192,7 @@ def enforce_contract(df, contract_path):
 ```python
 # tests/test_data_quality.py
 import pytest
-import pandera as pa
+import pandera.pandas as pa
 
 @pytest.fixture
 def training_data():
@@ -265,7 +265,7 @@ def validate_schema_evolution(current_schema, new_schema):
 
 ## Scripts
 
-- `scripts/validate_data.py` - Comprehensive data validation with GX and Pandera
+- `scripts/validate_data.py` - Dependency-light data validation (pandas-based checks, profiling, YAML schema)
 - `scripts/data_contract.py` - Data contract enforcement engine
 
 ## References

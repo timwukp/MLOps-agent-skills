@@ -71,7 +71,7 @@ _DOCKERFILE_TEMPLATE = textwrap.dedent("""\
          "-m", "/opt/model/model", \\
          "--host", "0.0.0.0", \\
          "--port", "8080", \\
-         "--no-conda"]
+         "--env-manager", "local"]
 """)
 
 _FRAMEWORK_PIP = {
@@ -87,7 +87,7 @@ def package_docker(model_path: str, output_dir: str, framework: str):
         import mlflow
         mlflow_version = mlflow.__version__
     except ImportError:
-        mlflow_version = "2.12.1"
+        mlflow_version = "3.14.0"
         logger.warning("mlflow not installed; defaulting to version %s in Dockerfile", mlflow_version)
 
     out = Path(output_dir)

@@ -84,8 +84,10 @@ class AlertManager:
     def __init__(self, rules: List[AlertRule], db_path: str = "alerts.db"):
         self.rules = rules
         self.db_path = db_path
-        self._last_fired: Dict[str, float] = {}
         self._init_db()
+        # Cooldown state is persisted in SQLite so it survives across CLI
+        # invocations (an in-memory dict would reset on every run).
+        self._last_fired: Dict[str, float] = self._load_last_fired()
 
     def _init_db(self) -> None:
         con = sqlite3.connect(self.db_path)
@@ -93,6 +95,26 @@ class AlertManager:
             "CREATE TABLE IF NOT EXISTS alert_history ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, rule_name TEXT, metric TEXT, "
             "value REAL, threshold REAL, severity TEXT, timestamp TEXT, message TEXT)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS alert_cooldowns ("
+            "rule_name TEXT PRIMARY KEY, last_fired REAL)"
+        )
+        con.commit()
+        con.close()
+
+    def _load_last_fired(self) -> Dict[str, float]:
+        con = sqlite3.connect(self.db_path)
+        rows = con.execute("SELECT rule_name, last_fired FROM alert_cooldowns").fetchall()
+        con.close()
+        return {name: ts for name, ts in rows}
+
+    def _save_last_fired(self, rule_name: str, ts: float) -> None:
+        con = sqlite3.connect(self.db_path)
+        con.execute(
+            "INSERT INTO alert_cooldowns (rule_name, last_fired) VALUES (?, ?) "
+            "ON CONFLICT(rule_name) DO UPDATE SET last_fired = excluded.last_fired",
+            (rule_name, ts),
         )
         con.commit()
         con.close()
@@ -116,6 +138,7 @@ class AlertManager:
                     logger.info("Rule '%s' in cooldown, skipping", rule.name)
                     continue
                 self._last_fired[rule.name] = now
+                self._save_last_fired(rule.name, now)
                 ts = datetime.now(timezone.utc).isoformat()
                 msg = rule.message or f"[{rule.severity.upper()}] {rule.name}: {rule.metric}={value} {rule.condition} {rule.threshold}"
                 alert = FiredAlert(rule.name, rule.metric, value, rule.threshold, rule.severity, ts, msg)
@@ -223,11 +246,21 @@ def _require_yaml():
 
 
 def load_rules(path: str) -> Dict[str, Any]:
-    """Load alert rules and channel config from YAML."""
+    """Load alert rules and channel config from YAML.
+
+    Unknown keys are dropped (with a warning) instead of raising TypeError
+    from AlertRule(**r).
+    """
     _require_yaml()
     with open(path, "r") as fh:
         raw = yaml.safe_load(fh)
-    rules = [AlertRule(**r) for r in raw.get("rules", [])]
+    known = set(AlertRule.__dataclass_fields__)
+    rules = []
+    for r in raw.get("rules", []):
+        extra = set(r) - known
+        if extra:
+            logger.warning("Ignoring unknown key(s) %s in rule '%s'", sorted(extra), r.get("name"))
+        rules.append(AlertRule(**{k: v for k, v in r.items() if k in known}))
     return {"rules": rules, "channels": raw.get("channels", {})}
 
 

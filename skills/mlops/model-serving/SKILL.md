@@ -34,13 +34,13 @@ This skill covers serving patterns from simple REST APIs to enterprise-grade ser
 ### 1. FastAPI Model Server
 
 ```python
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 import joblib
 import numpy as np
-from typing import List
+from typing import List, Optional
 import time
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 app = FastAPI(title="ML Model Server", version="1.0")
 
@@ -56,12 +56,14 @@ class PredictionRequest(BaseModel):
 
 class PredictionResponse(BaseModel):
     prediction: float
-    probability: List[float] = None
+    probability: Optional[List[float]] = None
     model_version: str = "v1.0"
     latency_ms: float
 
+# Note: `def` (not `async def`) so FastAPI runs the blocking model.predict()
+# in its threadpool instead of blocking the event loop.
 @app.post("/predict", response_model=PredictionResponse)
-async def predict(request: PredictionRequest):
+def predict(request: PredictionRequest):
     start = time.time()
     try:
         X = np.array(request.features).reshape(1, -1)
@@ -87,29 +89,36 @@ async def health():
 
 @app.get("/metrics")
 async def metrics():
-    return generate_latest()
+    # generate_latest() returns bytes; wrap in Response with the Prometheus
+    # content type (a JSONResponse would mangle the exposition format)
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 ```
 
 ### 2. BentoML Service
 
 ```python
+# BentoML 1.2+ service API (the 1.1 runner / bentoml.io API is deprecated)
 import bentoml
-from bentoml.io import NumpyNdarray, JSON
 import numpy as np
 
-# Save model to BentoML store
+# Save model to BentoML store (once, after training)
 bentoml.sklearn.save_model("my_model", model)
 
-# Create service
-runner = bentoml.sklearn.get("my_model:latest").to_runner()
-svc = bentoml.Service("prediction_service", runners=[runner])
+# service.py
+@bentoml.service(resources={"cpu": "2"}, traffic={"timeout": 30})
+class PredictionService:
+    model_ref = bentoml.models.get("my_model:latest")
 
-@svc.api(input=NumpyNdarray(), output=JSON())
-async def predict(input_array: np.ndarray):
-    result = await runner.predict.async_run(input_array)
-    return {"prediction": result.tolist()}
+    def __init__(self):
+        self.model = bentoml.sklearn.load_model(self.model_ref)
 
-# Build and containerize
+    @bentoml.api
+    def predict(self, input_array: np.ndarray) -> dict:
+        result = self.model.predict(input_array)
+        return {"prediction": result.tolist()}
+
+# Serve, build, and containerize
+# bentoml serve service:PredictionService
 # bentoml build
 # bentoml containerize prediction_service:latest
 ```
@@ -119,21 +128,21 @@ async def predict(input_array: np.ndarray):
 ```python
 import pandas as pd
 import joblib
-from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
-import numpy as np
+import pyarrow.parquet as pq
 
 def batch_predict(model_path, input_path, output_path, batch_size=10000):
     """Run batch inference on large datasets."""
     model = joblib.load(model_path)
 
-    # Process in chunks to manage memory
-    reader = pd.read_parquet(input_path)
-    total_rows = len(reader)
+    # Stream record batches so only one chunk is in memory at a time
+    # (pd.read_parquet would load the entire file up front)
+    parquet_file = pq.ParquetFile(input_path)
+    total_rows = parquet_file.metadata.num_rows
 
     results = []
-    for start in range(0, total_rows, batch_size):
-        chunk = reader.iloc[start:start + batch_size]
+    processed = 0
+    for record_batch in parquet_file.iter_batches(batch_size=batch_size):
+        chunk = record_batch.to_pandas()
         features = chunk.drop(columns=["id"], errors="ignore")
         predictions = model.predict(features)
         probabilities = model.predict_proba(features) if hasattr(model, "predict_proba") else None
@@ -144,7 +153,8 @@ def batch_predict(model_path, input_path, output_path, batch_size=10000):
             result["probability"] = probabilities.max(axis=1)
         results.append(result)
 
-        print(f"Processed {min(start + batch_size, total_rows)}/{total_rows}")
+        processed += len(chunk)
+        print(f"Processed {processed}/{total_rows}")
 
     output = pd.concat(results, ignore_index=True)
     output.to_parquet(output_path)
@@ -190,8 +200,9 @@ COPY server.py .
 
 EXPOSE 8000
 
+# python:*-slim images do not ship curl; use the stdlib instead
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)" || exit 1
 
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
 ```
@@ -268,7 +279,7 @@ spec:
 
 ```python
 import asyncio
-from collections import defaultdict
+import numpy as np
 
 class BatchPredictor:
     def __init__(self, model, max_batch_size=32, max_wait_ms=50):
@@ -279,23 +290,29 @@ class BatchPredictor:
         self.task = None
 
     async def predict(self, features):
-        future = asyncio.get_event_loop().create_future()
+        future = asyncio.get_running_loop().create_future()
         await self.queue.put((features, future))
-        if self.task is None or self.task.done():
-            self.task = asyncio.create_task(self._process_batch())
+        # Single long-lived worker avoids the arm/re-arm race that can
+        # strand items enqueued while a one-shot task is finishing
+        if self.task is None:
+            self.task = asyncio.create_task(self._worker())
         return await future
 
-    async def _process_batch(self):
-        await asyncio.sleep(self.max_wait_ms / 1000)
-        batch = []
-        while not self.queue.empty() and len(batch) < self.max_batch_size:
-            batch.append(await self.queue.get())
+    async def _worker(self):
+        while True:
+            batch = [await self.queue.get()]  # block until work arrives
+            await asyncio.sleep(self.max_wait_ms / 1000)
+            while not self.queue.empty() and len(batch) < self.max_batch_size:
+                batch.append(self.queue.get_nowait())
 
-        features = np.array([item[0] for item in batch])
-        predictions = self.model.predict(features)
-
-        for (_, future), pred in zip(batch, predictions):
-            future.set_result(pred)
+            features = np.array([item[0] for item in batch])
+            try:
+                predictions = self.model.predict(features)
+                for (_, future), pred in zip(batch, predictions):
+                    future.set_result(pred)
+            except Exception as exc:
+                for _, future in batch:
+                    future.set_exception(exc)
 ```
 
 ## Deployment Patterns

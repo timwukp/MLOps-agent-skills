@@ -2,46 +2,55 @@
 
 ## Model Pricing Comparison
 
-Pricing as of early 2026 (USD per 1M tokens). Always verify current rates with providers.
+Pricing verified 2026-07 (USD per 1M tokens). Always verify current rates with
+providers - these change several times a year. Cache reads are 0.1x input and the
+Batch API is 50% off on both OpenAI and Anthropic.
 
 | Model | Input (per 1M) | Output (per 1M) | Context Window | Relative Quality | Best For |
 |---|---|---|---|---|---|
-| **GPT-4o** | $2.50 | $10.00 | 128K | High | Complex reasoning, multi-modal |
-| **GPT-4o-mini** | $0.15 | $0.60 | 128K | Medium-High | General tasks, cost-effective |
-| **Claude 3.5 Sonnet** | $3.00 | $15.00 | 200K | High | Long-context, analysis |
-| **Claude 3.5 Haiku** | $0.80 | $4.00 | 200K | Medium | Fast, cost-effective |
-| **Llama 3.1 70B** (self-hosted) | ~$0.50* | ~$0.50* | 128K | Medium-High | Self-hosted, data privacy |
-| **Llama 3.1 8B** (self-hosted) | ~$0.10* | ~$0.10* | 128K | Medium | Edge, low-latency |
-| **Mistral Large** | $2.00 | $6.00 | 128K | Medium-High | European hosting, multilingual |
-| **Mistral Small** | $0.20 | $0.60 | 128K | Medium | Cost-effective alternative |
-| **Gemini 1.5 Pro** | $1.25 | $5.00 | 2M | High | Very long context tasks |
-| **Gemini 1.5 Flash** | $0.075 | $0.30 | 1M | Medium | High volume, low cost |
+| **claude-opus-5** | $5.00 | $25.00 | 200K | Very high | Hardest reasoning, agentic work |
+| **claude-sonnet-5** | $3.00 | $15.00 | 200K | High | Long-context, analysis, coding |
+| **claude-haiku-4-5** | $1.00 | $5.00 | 200K | Medium-High | Fast, cost-effective |
+| **claude-fable-5** | $10.00 | $50.00 | 200K | Frontier | Highest-difficulty tasks |
+| **gpt-5** (legacy, EOL 2026-12-11) | $1.25 | $10.00 | 400K | High | General reasoning |
+| **gpt-5-mini** | $0.25 | $2.00 | 400K | Medium-High | General tasks, cost-effective |
+| **gpt-4.1** | $2.00 | $8.00 | 1M | Medium-High | Very long context |
+| **gpt-4.1-mini** | $0.40 | $1.60 | 1M | Medium | High volume, long context |
+| **Llama 4 Scout / Maverick** (Bedrock) | ~$0.80 | ~$2.40 | 10M / 1M | Medium-High | Open weights, long context |
+| **DeepSeek V3.x** | ~$0.62 | ~$1.85 | 128K | Medium-High | Cost-sensitive reasoning |
+| **Llama 4 / Qwen3** (self-hosted) | infra only* | infra only* | Varies | Medium-High | Data privacy, very high volume |
 
-*Self-hosted costs are approximate and depend on infrastructure (GPU type, utilization, etc.).
+*Self-hosted costs are infrastructure-only and depend on GPU type and utilization;
+below roughly 40-50% sustained utilization a hosted API is usually cheaper.
+
+Retired - do not build against these: Claude 3.x (Opus/Sonnet/Haiku), Claude 3.5
+Sonnet/Haiku, Gemini 1.5 Pro/Flash. `gpt-4o` remains available as a legacy model
+at $2.50/$10.00 but is not a good default for new work.
 
 ### Cost Calculation Example
 
 ```python
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     pricing = {
-        "gpt-4o":         {"input": 2.50, "output": 10.00},
-        "gpt-4o-mini":    {"input": 0.15, "output": 0.60},
-        "claude-sonnet":  {"input": 3.00, "output": 15.00},
-        "claude-haiku":   {"input": 0.80, "output": 4.00},
+        "claude-opus-5":    {"input": 5.00, "output": 25.00},
+        "claude-sonnet-5":  {"input": 3.00, "output": 15.00},
+        "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+        "gpt-5":            {"input": 1.25, "output": 10.00},
+        "gpt-5-mini":       {"input": 0.25, "output": 2.00},
     }
-    p = pricing[model]
+    p = pricing[model]   # KeyError is intentional: never price an unknown model at $0
     return (input_tokens * p["input"] + output_tokens * p["output"]) / 1_000_000
 
 # Example: 1000 requests averaging 2000 input + 500 output tokens
-for model in ["gpt-4o", "gpt-4o-mini", "claude-sonnet", "claude-haiku"]:
+for model in ["claude-sonnet-5", "claude-haiku-4-5", "gpt-5", "gpt-5-mini"]:
     daily = estimate_cost(model, 2000 * 1000, 500 * 1000)
     print(f"{model}: ${daily:.2f}/day, ${daily * 30:.2f}/month")
 
 # Output:
-# gpt-4o:        $10.00/day, $300.00/month
-# gpt-4o-mini:   $0.60/day,  $18.00/month
-# claude-sonnet: $13.50/day, $405.00/month
-# claude-haiku:  $3.60/day,  $108.00/month
+# claude-sonnet-5:  $13.50/day, $405.00/month
+# claude-haiku-4-5: $4.50/day,  $135.00/month
+# gpt-5:            $7.50/day,  $225.00/month
+# gpt-5-mini:       $1.50/day,  $45.00/month
 ```
 
 ## Cost Optimization Strategies Overview
@@ -50,8 +59,9 @@ for model in ["gpt-4o", "gpt-4o-mini", "claude-sonnet", "claude-haiku"]:
 |---|---|---|---|---|
 | **Model Routing** | Medium | 40-70% | Minimal if done well | Mixed task complexity |
 | **Semantic Caching** | Medium | 20-60% | None (exact reproduction) | Repetitive queries |
+| **Provider Prompt Caching** | Very low | up to 90% on the cached prefix | None | Stable system prompt / tools / long docs |
 | **Prompt Compression** | Low-Medium | 15-40% | Low-Medium risk | Long prompts, RAG contexts |
-| **Batch API** | Low | 50% (OpenAI) | None | Non-real-time workloads |
+| **Batch API** | Low | 50% (OpenAI and Anthropic) | None | Non-real-time workloads |
 | **Prompt Optimization** | Low | 10-30% | May improve quality | Verbose or unoptimized prompts |
 | **Fine-Tuning** | High | 30-60% | Can improve or degrade | Repetitive, specialized tasks |
 | **Self-Hosting** | Very High | 50-80% at scale | Depends on model | Very high volume, data privacy |
@@ -93,17 +103,25 @@ cache.init(
 )
 cache.set_openai_key()
 
-# Use the cached OpenAI client
-response = openai.ChatCompletion.create(
-    model="gpt-4o",
+# GPTCache's openai adapter mirrors the SDK surface it was written against.
+# openai.ChatCompletion.create is the removed v0 API; on openai>=1.0 use the
+# client-style adapter:
+from gptcache.adapter.openai import ChatCompletion
+
+response = ChatCompletion.create(
+    model="gpt-5-mini",
     messages=[{"role": "user", "content": "What is machine learning?"}]
 )
 ```
 
+GPTCache is lightly maintained; check that its adapter matches your installed
+`openai` version, or wire your own cache around the SDK (as
+`scripts/cache_manager.py` does) rather than relying on monkey-patched clients.
+
 ### Custom Semantic Cache
 
 ```python
-import hashlib
+import time
 import numpy as np
 from openai import OpenAI
 
@@ -229,9 +247,9 @@ def classify_complexity(query: str) -> Complexity:
     return Complexity(result.strip().lower())
 
 MODEL_MAP = {
-    Complexity.SIMPLE: "gpt-4o-mini",
-    Complexity.MODERATE: "gpt-4o-mini",
-    Complexity.COMPLEX: "gpt-4o",
+    Complexity.SIMPLE: "gpt-5-mini",
+    Complexity.MODERATE: "gpt-5-mini",
+    Complexity.COMPLEX: "gpt-5",
 }
 
 def route_request(query: str) -> str:
@@ -246,7 +264,7 @@ def route_request(query: str) -> str:
 # Try cheap model first; fall back to expensive model if quality is low
 def cascade_route(query: str, quality_threshold: float = 0.8) -> str:
     # Step 1: Try cheap model
-    response = call_llm(model="gpt-4o-mini", prompt=query)
+    response = call_llm(model="gpt-5-mini", prompt=query)
 
     # Step 2: Evaluate quality
     quality = evaluate_response(query, response)
@@ -255,18 +273,18 @@ def cascade_route(query: str, quality_threshold: float = 0.8) -> str:
         return response  # Cheap model was sufficient
 
     # Step 3: Fall back to expensive model
-    return call_llm(model="gpt-4o", prompt=query)
+    return call_llm(model="gpt-5", prompt=query)
 ```
 
 ### Task-Based Routing
 
 | Task Type | Recommended Model | Rationale |
 |---|---|---|
-| Simple Q&A / FAQ | GPT-4o-mini, Haiku | Low complexity, high volume |
-| Summarization | GPT-4o-mini, Gemini Flash | Good enough quality at lower cost |
-| Code Generation | GPT-4o, Claude Sonnet | Requires strong reasoning |
-| Complex Analysis | GPT-4o, Claude Sonnet | Multi-step reasoning needed |
-| Translation | Mistral, GPT-4o-mini | Specialized capability |
+| Simple Q&A / FAQ | gpt-5-mini, claude-haiku-4-5 | Low complexity, high volume |
+| Summarization | gpt-5-mini, claude-haiku-4-5 | Good enough quality at lower cost |
+| Code Generation | claude-sonnet-5, gpt-5 | Requires strong reasoning |
+| Complex Analysis | claude-opus-5, claude-sonnet-5 | Multi-step reasoning needed |
+| Translation | gpt-5-mini, Mistral Large 3 | Specialized capability |
 | Classification | Fine-tuned small model | Highest cost efficiency |
 | Embedding | text-embedding-3-small | Dedicated embedding model |
 
@@ -289,7 +307,7 @@ for i, prompt in enumerate(prompts):
         "method": "POST",
         "url": "/v1/chat/completions",
         "body": {
-            "model": "gpt-4o",
+            "model": "gpt-5-mini",
             "messages": [{"role": "user", "content": prompt}]
         }
     })
@@ -380,7 +398,10 @@ class LLMCostTracker:
 - Defaulting to the most expensive model for all tasks without evaluating cheaper alternatives.
 - Implementing caching without proper invalidation, serving stale responses.
 - Compressing prompts so aggressively that output quality degrades noticeably.
-- Not accounting for embedding costs when implementing semantic caching.
+- Not accounting for embedding costs when implementing semantic caching (a
+  semantic-cache hit is cheap, not free - it still costs one embedding call).
+- Breaking provider prompt caching by compressing or reordering the prefix, or by
+  injecting a timestamp/request id ahead of the stable content.
 - Setting cache similarity thresholds too low, returning irrelevant cached results.
 - Ignoring the cost of the routing classifier itself in model routing setups.
 - Failing to re-evaluate cost strategies when providers update pricing.

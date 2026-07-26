@@ -4,8 +4,12 @@
 Usage:
     python guardrails_pipeline.py check-input --input "Tell me John's SSN 123-45-6789"
     python guardrails_pipeline.py check-output --input "The answer is ..." --context "source doc"
-    python guardrails_pipeline.py run-pipeline --input "Summarize this" --model gpt-4o-mini
+    python guardrails_pipeline.py run-pipeline --input "Summarize this" --model gpt-5-mini
     python guardrails_pipeline.py check-input --input "some text" --config guardrails.yaml
+
+Note: the regex checks here are a cheap first layer, not a complete defense.
+Pair them with a classifier-based scanner (Prompt Guard 2, Llama Guard 4,
+LLM Guard, omni-moderation-latest) before trusting them in production.
 """
 import argparse
 import json
@@ -39,11 +43,15 @@ SENSITIVE_TOPICS = [
     "prescription", "lawsuit", "investment recommendation", "classified",
     "top secret", "confidential government",
 ]
+# Order matters for redaction: the most specific / longest patterns must run
+# first, otherwise the phone pattern eats 10 digits out of a credit card number
+# and leaves the remaining 6 digits in the clear. Python dicts keep insertion
+# order, and _redact_pii relies on it.
 PII_PATTERNS = {
-    "email": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
-    "phone": r"(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
     "credit_card": r"\b(?:\d{4}[-\s]?){3}\d{4}\b",
+    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+    "phone": r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+    "email": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
 }
 
 
@@ -59,8 +67,13 @@ class CheckResult:
 class GuardrailConfig:
     max_input_length: int = 8000
     blocked_severity: str = "high"
-    failure_action: str = "block"  # block, warn, redact, fallback
+    # block/fallback -> return fallback_response; redact -> strip PII and continue;
+    # warn -> log the violation but return the model response unchanged.
+    failure_action: str = "block"
     fallback_response: str = "I cannot process this request due to safety constraints."
+    # When a check cannot run (missing dependency, detector error) treat it as a
+    # failure rather than a pass. See REFERENCE.md "Fail closed".
+    fail_closed_on_error: bool = True
     custom_blocked_patterns: List[str] = field(default_factory=list)
     custom_allowed_topics: List[str] = field(default_factory=list)
     enabled_input_checks: List[str] = field(default_factory=lambda: [
@@ -98,6 +111,13 @@ class InputGuardrail:
     def __init__(self, config: GuardrailConfig):
         self.config = config
 
+    def _unavailable(self, name: str, reason: str, severity: str = "high") -> CheckResult:
+        """A check that could not run. Fails closed unless configured otherwise."""
+        if self.config.fail_closed_on_error:
+            return CheckResult(False, name, f"Check unavailable ({reason}) - failing closed",
+                               severity)
+        return CheckResult(True, name, f"Check unavailable ({reason}) - failing open")
+
     def check_all(self, text: str) -> List[CheckResult]:
         results = []
         check_map = {"injection": self._injection, "pii": self._pii,
@@ -113,8 +133,10 @@ class InputGuardrail:
         return results
 
     def _injection(self, text: str) -> CheckResult:
+        # Match against the original text with IGNORECASE. Lowercasing first
+        # would make the uppercase literals (DAN, <<SYS>>, [INST]) unmatchable.
         for pattern in INJECTION_PATTERNS:
-            m = re.search(pattern, text.lower())
+            m = re.search(pattern, text, re.IGNORECASE)
             if m:
                 return CheckResult(False, "prompt_injection",
                                    f"Injection pattern: '{m.group()}'", "critical")
@@ -143,9 +165,9 @@ class InputGuardrail:
             from langdetect import detect
             lang = detect(text)
         except ImportError:
-            return CheckResult(True, "language", "langdetect not installed, skipping")
-        except Exception:
-            return CheckResult(True, "language", "Detection failed, skipping")
+            return self._unavailable("language", "langdetect not installed", "low")
+        except Exception as e:
+            return self._unavailable("language", f"detection failed: {e}", "low")
         if lang == "en":
             return CheckResult(True, "language", f"Language: {lang}")
         return CheckResult(False, "language", f"Non-English detected: {lang}", "low")
@@ -224,38 +246,54 @@ class GuardrailsPipeline:
         self.input_guard = InputGuardrail(config)
         self.output_guard = OutputGuardrail(config)
 
-    def run(self, user_input: str, model: str = "gpt-4o-mini",
+    def run(self, user_input: str, model: str = "gpt-5-mini",
             context: Optional[str] = None) -> Dict[str, Any]:
         result = {"input": user_input, "model": model,
                   "input_checks": [], "output_checks": [], "blocked": False}
+        action = self.config.failure_action
+        prompt = user_input
+
         # Input checks
         in_results = self.input_guard.check_all(user_input)
         result["input_checks"] = [asdict(r) for r in in_results]
         failures = [r for r in in_results if not r.passed]
         if failures and self._should_block(failures):
-            result["blocked"] = True
-            result["action"] = self.config.failure_action
-            if self.config.failure_action == "redact":
-                result["response"] = self._call_llm(self._redact_pii(user_input), model)
-            else:
+            names = [f.check_name for f in failures]
+            result["action"] = action
+            if action in ("block", "fallback"):
+                # fallback == block for input: never send a violating prompt to the LLM.
+                result["blocked"] = True
                 result["response"] = self.config.fallback_response
-            logger.warning(f"Input blocked: {[f.check_name for f in failures]}")
-            return result
-        # LLM call
-        llm_response = self._call_llm(user_input, model)
+                logger.warning(f"Input blocked ({action}): {names}")
+                return result
+            if action == "redact":
+                prompt = self._redact_pii(user_input)
+                result["redacted_input"] = prompt
+                logger.warning(f"Input redacted: {names}")
+            else:  # warn: log only, let the request through
+                logger.warning(f"Input violation (warn, allowed through): {names}")
+
+        # LLM call - output guardrails always run, including on the redacted path.
+        llm_response = self._call_llm(prompt, model)
         result["raw_response"] = llm_response
+
         # Output checks
         out_results = self.output_guard.check_all(llm_response, context)
         result["output_checks"] = [asdict(r) for r in out_results]
         out_failures = [r for r in out_results if not r.passed]
         if out_failures and self._should_block(out_failures):
-            result["blocked"] = True
-            result["action"] = self.config.failure_action
-            if self.config.failure_action == "redact":
+            names = [f.check_name for f in out_failures]
+            result["action"] = action
+            if action == "redact":
                 result["response"] = self._redact_pii(llm_response)
-            else:
+                logger.warning(f"Output redacted: {names}")
+            elif action == "warn":
+                result["response"] = llm_response
+                logger.warning(f"Output violation (warn, returned as-is): {names}")
+            else:  # block or fallback
+                result["blocked"] = True
                 result["response"] = self.config.fallback_response
-            logger.warning(f"Output blocked: {[f.check_name for f in out_failures]}")
+                logger.warning(f"Output blocked ({action}): {names}")
         else:
             result["response"] = llm_response
         return result
@@ -266,6 +304,8 @@ class GuardrailsPipeline:
 
     @staticmethod
     def _redact_pii(text: str) -> str:
+        # PII_PATTERNS is ordered most-specific-first (credit_card before phone)
+        # so that longer identifiers are consumed before shorter ones.
         for pii_type, pattern in PII_PATTERNS.items():
             text = re.sub(pattern, f"[REDACTED_{pii_type.upper()}]", text)
         return text
@@ -278,7 +318,7 @@ class GuardrailsPipeline:
             resp = client.chat.completions.create(
                 model=model, messages=[{"role": "user", "content": prompt}],
                 temperature=0, max_tokens=1024)
-            return resp.choices[0].message.content
+            return resp.choices[0].message.content or ""
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             return f"[LLM error: {e}]"
@@ -299,7 +339,7 @@ def main():
     parser.add_argument("--input", required=True, help="Input text to check")
     parser.add_argument("--context", default=None, help="Context for hallucination checking")
     parser.add_argument("--config", default=None, help="YAML config file path")
-    parser.add_argument("--model", default="gpt-4o-mini", help="Model for pipeline mode")
+    parser.add_argument("--model", default="gpt-5-mini", help="Model for pipeline mode")
     parser.add_argument("--failure-action", choices=["block", "warn", "redact", "fallback"],
                         default=None, help="Override failure action")
     parser.add_argument("--json", action="store_true", help="Output as JSON")

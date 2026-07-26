@@ -52,20 +52,19 @@ def serve(args):
 
 def generate_docker_compose(args):
     """Generate a docker-compose.yaml for production vLLM deployment."""
-    quant_env = f"\n      - QUANTIZATION={args.quantization}" if args.quantization not in (None, "none") else ""
+    # Values are inlined into command: — compose interpolates ${VAR} from the
+    # host shell (not the container environment), so ${MODEL} etc. would be empty.
+    quant_arg = f" --quantization {args.quantization}" if args.quantization not in (None, "none") else ""
     compose = (
         'version: "3.8"\n\nservices:\n  vllm:\n    image: vllm/vllm-openai:latest\n'
         f'    runtime: nvidia\n    ports:\n      - "{args.port}:8000"\n'
-        f"    environment:\n      - MODEL={args.model}\n"
-        f"      - TENSOR_PARALLEL_SIZE={args.tp}\n"
-        f"      - GPU_MEMORY_UTILIZATION={args.gpu_memory_utilization}\n"
-        f"      - MAX_MODEL_LEN={args.max_model_len}{quant_env}\n"
+        "    environment:\n"
         "      - HF_TOKEN=${HF_TOKEN:-}\n"
         "    volumes:\n      - huggingface-cache:/root/.cache/huggingface\n"
         "    command: >\n"
-        "      --model ${MODEL} --tensor-parallel-size ${TENSOR_PARALLEL_SIZE}\n"
-        "      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}\n"
-        "      --max-model-len ${MAX_MODEL_LEN} --host 0.0.0.0 --port 8000\n"
+        f"      --model {args.model} --tensor-parallel-size {args.tp}\n"
+        f"      --gpu-memory-utilization {args.gpu_memory_utilization}\n"
+        f"      --max-model-len {args.max_model_len}{quant_arg} --host 0.0.0.0 --port 8000\n"
         "    deploy:\n      resources:\n        reservations:\n          devices:\n"
         f"            - driver: nvidia\n              count: {args.tp}\n"
         "              capabilities: [gpu]\n"
@@ -156,6 +155,7 @@ def _send_request(url, model, prompt, max_tokens=256):
                 if delta.get("content"):
                     if first_token_time is None:
                         first_token_time = time.perf_counter()
+                    # Approximation: counts SSE chunks, not exact tokens
                     total_tokens += 1
     except Exception as exc:
         return {"error": str(exc)}
@@ -182,6 +182,7 @@ def benchmark(args):
     url = f"http://localhost:{args.port}"
     logger.info(f"Benchmarking {url} | requests={args.num_requests} concurrency={args.concurrency}")
     results = []
+    wall_start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = [
             pool.submit(_send_request, url, args.model, BENCHMARK_PROMPTS[i % len(BENCHMARK_PROMPTS)])
@@ -189,6 +190,7 @@ def benchmark(args):
         ]
         for fut in as_completed(futures):
             results.append(fut.result())
+    wall_elapsed = time.perf_counter() - wall_start
     successes = [r for r in results if "error" not in r]
     errors = [r for r in results if "error" in r]
     if not successes:
@@ -207,7 +209,11 @@ def benchmark(args):
         "tps_p50": round(_percentile(tps_vals, 50), 2),
         "latency_mean": round(sum(latencies) / len(latencies), 4),
         "latency_p95": round(_percentile(latencies, 95), 4),
-        "throughput_rps": round(len(successes) / max(latencies), 2) if latencies else 0,
+        # Throughput = completed requests over total wall-clock time, not max latency
+        "throughput_rps": round(len(successes) / wall_elapsed, 2) if wall_elapsed > 0 else 0,
+        # Note: tps counts SSE content chunks, an approximation of tokens/sec
+        # (a chunk may carry more or less than one token).
+        "tps_note": "tokens/sec approximated by SSE chunk count",
     }
     print(json.dumps(report, indent=2))
     logger.info("Benchmark complete")
