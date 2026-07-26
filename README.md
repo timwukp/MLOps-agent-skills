@@ -92,6 +92,15 @@ skill-name/
 - **Production-ready**: Scripts include error handling, logging, CLI interfaces
 - **Progressive disclosure**: Quick guidance in SKILL.md, deep details in references
 
+## Testing & Validation
+
+Every skill is continuously tested — see [TEST_RESULTS.md](TEST_RESULTS.md) for the full report:
+
+- **Schema validation**: all 25 skills validated against the Agent Skills specification (`tests/validate_skills.py`)
+- **Script tests**: all 50 bundled scripts compile and pass CLI tests (`tests/test_scripts.py`), run automatically in CI on every push
+- **Accuracy review (2026-07)**: all code examples and technical claims deep-reviewed against current library releases (MLflow 3.x, Evidently 0.7+, Great Expectations 1.x, Airflow 3.x, Prefect 3.x, TRL 1.x, RAGAS 0.2+, LangChain/LangGraph 1.x, SageMaker SDK v3) and current model pricing
+- **Live AWS validation**: the model-training, model-registry, and model-serving patterns were executed end-to-end on a real AWS SageMaker account — registry lifecycle 7/7 checks passed, serverless endpoint deploy + invoke 5/5 checks passed. Reproducible scripts in [`tests/aws_validation/`](tests/aws_validation/)
+
 ## License
 
 Apache-2.0

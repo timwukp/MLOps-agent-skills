@@ -11,7 +11,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -48,14 +48,18 @@ def ks_test(reference, current, significance=0.05):
 
 
 def chi2_test(reference, current, significance=0.05):
-    """Chi-squared test for categorical features."""
+    """Chi-squared test for categorical features.
+
+    Uses a 2xk contingency table (reference vs current counts per category).
+    Unlike stats.chisquare, chi2_contingency computes expected counts internally,
+    so it works even when a category is missing from one of the samples.
+    """
     from scipy import stats
-    categories = set(reference.dropna().unique()) | set(current.dropna().unique())
+    categories = list(set(reference.dropna().unique()) | set(current.dropna().unique()))
     ref_counts = reference.value_counts().reindex(categories, fill_value=0)
     cur_counts = current.value_counts().reindex(categories, fill_value=0)
-    expected = (ref_counts / ref_counts.sum()) * cur_counts.sum()
-    expected = expected.clip(lower=1)
-    stat, p_value = stats.chisquare(cur_counts, f_exp=expected)
+    table = np.array([ref_counts.to_numpy(), cur_counts.to_numpy()])
+    stat, p_value, _, _ = stats.chi2_contingency(table)
     return {
         "test": "chi2", "statistic": float(stat),
         "p_value": float(p_value), "drift_detected": p_value < significance,
@@ -107,7 +111,7 @@ def detect_drift(ref_df, cur_df, columns=None, tests=None, significance=0.05):
     drift_score = len(drifted) / len(results) if results else 0
 
     return {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "columns_checked": len(results),
         "columns_drifted": len(drifted),
         "drifted_columns": drifted,

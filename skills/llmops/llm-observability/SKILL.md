@@ -21,6 +21,8 @@ metadata:
 LLM observability tracks the behavior, quality, cost, and performance of LLM applications
 in production - going beyond traditional monitoring to understand WHY outputs are good or bad.
 
+Tested with: `langfuse>=3`, `langsmith>=0.4`, `arize-phoenix>=8`, `openai>=1.0`.
+
 ## When to Use This Skill
 
 - Setting up monitoring for LLM applications
@@ -46,27 +48,32 @@ in production - going beyond traditional monitoring to understand WHY outputs ar
 ### 1. Token Usage and Cost Tracking
 
 ```python
-import tiktoken
-from datetime import datetime
+import pandas as pd
+from datetime import datetime, timezone
 
 class LLMCostTracker:
-    # Pricing per 1M tokens (as of 2024, check for updates)
+    # Pricing per 1M tokens, verified 2026-07. Re-check the provider pricing
+    # pages before trusting these; model aliases are unversioned on purpose.
     PRICING = {
-        "gpt-4o": {"input": 2.50, "output": 10.00},
-        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-        "claude-sonnet-4-6-20250514": {"input": 3.00, "output": 15.00},
-        "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+        "gpt-5": {"input": 1.25, "output": 10.00},
+        "gpt-5-mini": {"input": 0.25, "output": 2.00},
+        "claude-opus-5": {"input": 5.00, "output": 25.00},
+        "claude-sonnet-5": {"input": 3.00, "output": 15.00},
+        "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
     }
 
     def __init__(self):
         self.records = []
 
     def track(self, model, input_tokens, output_tokens, metadata=None):
-        pricing = self.PRICING.get(model, {"input": 0, "output": 0})
+        if model not in self.PRICING:
+            # Never silently price an unknown model at $0.
+            raise KeyError(f"No pricing for '{model}'; add it to PRICING")
+        pricing = self.PRICING[model]
         cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
         record = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "model": model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -79,36 +86,45 @@ class LLMCostTracker:
 
     def daily_report(self):
         df = pd.DataFrame(self.records)
-        return df.groupby(["model"]).agg({
-            "input_tokens": "sum",
-            "output_tokens": "sum",
-            "cost_usd": "sum",
-            "model": "count",
-        }).rename(columns={"model": "request_count"})
+        # Named aggregation: aggregating the grouping key ("model") itself is
+        # fragile/deprecated in pandas. Count a real column instead.
+        return df.groupby("model").agg(
+            input_tokens=("input_tokens", "sum"),
+            output_tokens=("output_tokens", "sum"),
+            cost_usd=("cost_usd", "sum"),
+            request_count=("total_tokens", "count"),
+        )
 ```
+
+Token counting: `tiktoken` is OpenAI-only - use `tiktoken.encoding_for_model(model)`
+rather than hardcoding `cl100k_base` (current OpenAI models use `o200k_base`).
+For Claude, tiktoken is categorically wrong; call
+`client.messages.count_tokens(model=..., messages=[...])` instead. Best of all,
+read the `usage` block the provider returns rather than estimating.
 
 ### 2. LangSmith Tracing
 
 ```python
 import os
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_API_KEY"] = "ls__..."
-os.environ["LANGCHAIN_PROJECT"] = "my-llm-app"
+# LANGSMITH_* is the current naming; the LANGCHAIN_* variables are legacy
+# aliases. Current keys are prefixed lsv2_pt_ (personal) / lsv2_sk_ (service).
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_API_KEY"] = "lsv2_pt_..."
+os.environ["LANGSMITH_PROJECT"] = "my-llm-app"
 
 from langchain_openai import ChatOpenAI
-from langchain.callbacks import LangChainTracer
 
-# Automatic tracing with LangChain
-llm = ChatOpenAI(model="gpt-4o")
+# Automatic tracing with LangChain - no callback wiring needed
+llm = ChatOpenAI(model="gpt-5-mini")
 response = llm.invoke("What is MLOps?")  # Automatically traced
 
-# Manual tracing
+# Manual tracing for plain SDK calls
 from langsmith import traceable
 
 @traceable(run_type="llm", name="custom-llm-call")
 def my_llm_function(query: str) -> str:
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5-mini",
         messages=[{"role": "user", "content": query}],
     )
     return response.choices[0].message.content
@@ -116,30 +132,37 @@ def my_llm_function(query: str) -> str:
 
 ### 3. LangFuse Integration
 
-```python
-from langfuse import Langfuse
-from langfuse.decorators import observe, langfuse_context
+Langfuse v3 is an OpenTelemetry-based rewrite: `langfuse.decorators` and
+`langfuse_context` were removed. Import `observe` from the top-level package and
+get the singleton client with `get_client()`.
 
-langfuse = Langfuse()
+```python
+from langfuse import observe, get_client
+
+langfuse = get_client()
 
 @observe()
 def my_rag_pipeline(query: str):
-    # Retrieval step (automatically traced)
-    langfuse_context.update_current_observation(name="retrieval")
-    docs = retriever.invoke(query)
+    # Nested spans are explicit context managers in v3
+    with langfuse.start_as_current_span(name="retrieval") as span:
+        docs = retriever.invoke(query)
+        span.update(output={"n_docs": len(docs)})
 
-    # Generation step
-    langfuse_context.update_current_observation(name="generation")
-    response = llm.invoke(format_prompt(query, docs))
+    with langfuse.start_as_current_generation(
+        name="generation", model="gpt-5-mini"
+    ) as gen:
+        response = llm.invoke(format_prompt(query, docs))
+        gen.update(output=response)
 
-    # Log quality score
-    langfuse_context.score_current_trace(
-        name="relevance",
-        value=0.9,
-        comment="Highly relevant response",
+    # Attach a score to the enclosing trace
+    langfuse.update_current_trace(
+        metadata={"n_docs": len(docs)},
     )
-
+    langfuse.score_current_trace(name="relevance", value=0.9,
+                                 comment="Highly relevant response")
     return response
+
+langfuse.flush()  # required before a short-lived process exits
 ```
 
 ### 4. Latency Monitoring
@@ -156,33 +179,42 @@ class LLMLatencyMetrics:
     input_tokens: int
     output_tokens: int
 
-def measure_streaming_latency(client, messages, model="gpt-4o"):
+def measure_streaming_latency(client, messages, model="gpt-5-mini"):
     """Measure detailed latency metrics for streaming responses."""
     start = time.time()
     first_token_time = None
-    output_tokens = 0
+    chunk_count = 0
+    usage = None
 
     stream = client.chat.completions.create(
         model=model, messages=messages, stream=True, stream_options={"include_usage": True}
     )
 
     for chunk in stream:
+        # With include_usage=True the final chunk carries usage and no choices.
+        if chunk.usage:
+            usage = chunk.usage
         if chunk.choices and chunk.choices[0].delta.content:
             if first_token_time is None:
                 first_token_time = time.time()
-            output_tokens += 1
+            chunk_count += 1
 
     end = time.time()
     ttft = (first_token_time - start) * 1000 if first_token_time else 0
     total = (end - start) * 1000
     generation_time = (end - first_token_time) if first_token_time else 0
+
+    # A chunk is not a token - use the authoritative usage block; fall back to
+    # the chunk count only when usage is unavailable.
+    output_tokens = usage.completion_tokens if usage else chunk_count
+    input_tokens = usage.prompt_tokens if usage else 0
     tps = output_tokens / generation_time if generation_time > 0 else 0
 
     return LLMLatencyMetrics(
         ttft_ms=round(ttft, 1),
         tps=round(tps, 1),
         total_ms=round(total, 1),
-        input_tokens=0,  # From usage
+        input_tokens=input_tokens,
         output_tokens=output_tokens,
     )
 ```
@@ -190,6 +222,10 @@ def measure_streaming_latency(client, messages, model="gpt-4o"):
 ### 5. Feedback Collection
 
 ```python
+from collections import Counter
+from datetime import datetime, timezone
+from statistics import mean
+
 class FeedbackCollector:
     def __init__(self, storage):
         self.storage = storage
@@ -199,7 +235,8 @@ class FeedbackCollector:
             "trace_id": trace_id,
             "query": query,
             "response": response,
-            "timestamp": datetime.utcnow().isoformat(),
+            # datetime.utcnow() is deprecated (naive UTC); use aware timestamps.
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "metadata": metadata,
             "feedback": None,
         })
@@ -210,7 +247,7 @@ class FeedbackCollector:
         record["feedback"] = {
             "rating": rating,        # 1-5 or thumbs up/down
             "comment": comment,
-            "feedback_at": datetime.utcnow().isoformat(),
+            "feedback_at": datetime.now(timezone.utc).isoformat(),
         }
         self.storage.update(record)
 
@@ -223,8 +260,8 @@ class FeedbackCollector:
         return {
             "total_interactions": len(records),
             "feedback_rate": len(with_feedback) / max(len(records), 1),
-            "avg_rating": np.mean(ratings) if ratings else None,
-            "rating_distribution": dict(pd.Series(ratings).value_counts()),
+            "avg_rating": mean(ratings) if ratings else None,
+            "rating_distribution": dict(Counter(ratings)),
         }
 ```
 

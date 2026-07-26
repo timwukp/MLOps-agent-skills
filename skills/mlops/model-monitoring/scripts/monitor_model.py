@@ -9,7 +9,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -31,14 +31,26 @@ def compute_classification_metrics(y_true, y_pred):
 
 
 def compute_regression_metrics(y_true, y_pred):
-    """Compute regression metrics."""
+    """Compute regression metrics.
+
+    MAPE is undefined when y_true contains zeros, so those rows are
+    excluded from the MAPE calculation (mape is None if all are zero).
+    """
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    nonzero = y_true != 0
+    mape = (
+        float(np.mean(np.abs((y_true[nonzero] - y_pred[nonzero]) / y_true[nonzero])) * 100)
+        if nonzero.any() else None
+    )
     return {
         "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "r2": float(r2_score(y_true, y_pred)),
-        "mape": float(np.mean(np.abs((y_true - y_pred) / np.where(y_true != 0, y_true, 1))) * 100),
+        "mape": mape,
+        "mape_excluded_zero_rows": int((~nonzero).sum()),
     }
 
 
@@ -69,6 +81,8 @@ def check_thresholds(metrics, thresholds):
     """Check metrics against thresholds."""
     violations = []
     for metric, value in metrics.items():
+        if value is None:
+            continue
         if metric in thresholds:
             threshold = thresholds[metric]
             if isinstance(threshold, dict):
@@ -91,25 +105,34 @@ def check_thresholds(metrics, thresholds):
 
 
 def generate_evidently_report(reference_df, current_df, output_path):
-    """Generate Evidently drift and quality reports."""
+    """Generate Evidently drift and summary reports (Evidently 0.7+ API)."""
     try:
-        from evidently.report import Report
-        from evidently.metric_preset import DataDriftPreset, DataQualityPreset
+        from evidently import Report, Dataset, DataDefinition
+        from evidently.presets import DataDriftPreset, DataSummaryPreset
 
-        report = Report(metrics=[DataDriftPreset(), DataQualityPreset()])
-        report.run(reference_data=reference_df, current_data=current_df)
+        definition = DataDefinition(
+            numerical_columns=[c for c in reference_df.columns
+                               if pd.api.types.is_numeric_dtype(reference_df[c])],
+            categorical_columns=[c for c in reference_df.columns
+                                 if not pd.api.types.is_numeric_dtype(reference_df[c])],
+        )
+        reference = Dataset.from_pandas(reference_df, data_definition=definition)
+        current = Dataset.from_pandas(current_df, data_definition=definition)
+
+        report = Report([DataDriftPreset(), DataSummaryPreset()])
+        snapshot = report.run(current, reference)
 
         if output_path.endswith(".html"):
-            report.save_html(output_path)
+            snapshot.save_html(output_path)
         else:
-            result = report.as_dict()
+            result = snapshot.dict()
             with open(output_path, "w") as f:
                 json.dump(result, f, indent=2, default=str)
 
         logger.info(f"Evidently report saved to {output_path}")
         return True
     except ImportError:
-        logger.warning("Evidently not installed. Skipping Evidently report.")
+        logger.warning("Evidently (>=0.7) not installed. Skipping Evidently report.")
         return False
 
 
@@ -132,7 +155,7 @@ def main():
 
     logger.info(f"Reference: {len(ref_df)} rows, Current: {len(cur_df)} rows")
 
-    report = {"timestamp": datetime.utcnow().isoformat()}
+    report = {"timestamp": datetime.now(timezone.utc).isoformat()}
 
     # Performance metrics
     if args.target and args.target in cur_df.columns and args.prediction in cur_df.columns:

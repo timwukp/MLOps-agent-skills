@@ -168,7 +168,9 @@ def _xgb_search_space(trial, task: str) -> Dict:
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
         "verbosity": 0,
-        "early_stopping_rounds": 20,
+        # NOTE: no early_stopping_rounds here -- XGBoost requires an eval_set
+        # when it is set, and cross_val_score's internal fit() passes none,
+        # so every trial would raise. n_estimators is tuned instead.
     }
     if task == "classification":
         params["eval_metric"] = "logloss"
@@ -233,8 +235,8 @@ def build_model(model_type: str, task: str, params: Dict) -> Any:
     if model_type == "xgb":
         xgb = _import_xgboost()
         cls = xgb.XGBClassifier if task == "classification" else xgb.XGBRegressor
-        if early_stop is not None:
-            p["early_stopping_rounds"] = early_stop
+        # early_stopping_rounds is intentionally NOT passed: it requires an
+        # eval_set at fit() time, which cross_val_score never provides.
         if eval_metric is not None:
             p["eval_metric"] = eval_metric
         return cls(**p, n_jobs=-1, random_state=42)
@@ -348,8 +350,11 @@ def run_training(args: argparse.Namespace) -> Dict:
     best_model.fit(X, y)
     y_pred = best_model.predict(X)
 
+    # These are resubstitution metrics (predicting on the training data),
+    # so they are optimistic. Use best_cv_score for generalization estimates.
     metrics = compute_metrics(y, y_pred, args.task)
-    logger.info("Final (full-data) metrics: %s", metrics)
+    logger.info("Resubstitution (train-data) metrics -- optimistic, "
+                "use best_cv_score for generalization: %s", metrics)
 
     # Save model
     os.makedirs(args.output, exist_ok=True)
@@ -375,7 +380,7 @@ def run_training(args: argparse.Namespace) -> Dict:
         "best_trial": study.best_trial.number,
         "best_cv_score": float(study.best_value),
         "best_params": {k: v for k, v in study.best_params.items()},
-        "final_metrics": metrics,
+        "train_resubstitution_metrics": metrics,
         "model_path": model_path,
         "training_time_seconds": round(elapsed, 2),
     }

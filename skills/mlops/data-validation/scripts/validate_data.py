@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Data validation tool using Great Expectations and Pandera.
+"""Dependency-light data validation tool (pandas-based checks).
+
+Runs hand-rolled quality checks, statistical profiling, and YAML schema
+validation without requiring Great Expectations or Pandera.
 
 Usage:
     python validate_data.py --data data.parquet --checks basic
@@ -10,7 +13,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -165,7 +168,7 @@ def main():
     df = load_data(args.data)
     logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns")
 
-    report = {"timestamp": datetime.utcnow().isoformat(), "source": args.data}
+    report = {"timestamp": datetime.now(timezone.utc).isoformat(), "source": args.data}
 
     # Basic checks
     results = basic_checks(df)

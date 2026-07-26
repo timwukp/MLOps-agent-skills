@@ -21,6 +21,8 @@ metadata:
 LLM agents extend language models with the ability to reason, plan, use tools, and take
 actions. Orchestration manages complex multi-step workflows and multi-agent collaboration.
 
+Tested with: `langgraph>=1.0`, `langchain>=1.0`, `crewai>=1.0`, `openai>=1.0`.
+
 ## When to Use This Skill
 
 - Building LLM-powered agents with tool use
@@ -52,20 +54,26 @@ import json
 
 client = OpenAI()
 
+# strict: True + additionalProperties: false enables structured-output
+# validation of tool arguments. Under strict mode every property must be listed
+# in "required", and JSON Schema "default" is NOT honored - the model either
+# supplies a value or you apply the default yourself after parsing.
 tools = [
     {
         "type": "function",
         "function": {
             "name": "search_database",
             "description": "Search the product database for items matching a query",
+            "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
                     "category": {"type": "string", "enum": ["electronics", "clothing", "books"]},
-                    "max_results": {"type": "integer", "default": 5},
+                    "max_results": {"type": "integer", "description": "Max results, use 5 if unspecified"},
                 },
-                "required": ["query"],
+                "required": ["query", "category", "max_results"],
+                "additionalProperties": False,
             },
         },
     },
@@ -74,12 +82,14 @@ tools = [
         "function": {
             "name": "get_weather",
             "description": "Get current weather for a location",
+            "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
                     "location": {"type": "string"},
                 },
                 "required": ["location"],
+                "additionalProperties": False,
             },
         },
     },
@@ -93,13 +103,19 @@ def run_agent(user_message, max_iterations=5):
 
     for _ in range(max_iterations):
         response = client.chat.completions.create(
-            model="gpt-4o", messages=messages, tools=tools
+            model="gpt-5-mini", messages=messages, tools=tools
         )
 
-        message = response.choices[0].message
+        choice = response.choices[0]
+        message = choice.message
+
+        if choice.finish_reason == "length":
+            return "Response truncated - raise max_tokens or shorten the context"
 
         if message.tool_calls:
-            messages.append(message)
+            # Append the assistant turn as a plain dict; passing the SDK object
+            # back works today but model_dump() is the documented round-trip.
+            messages.append(message.model_dump(exclude_none=True))
             for tool_call in message.tool_calls:
                 result = execute_tool(tool_call.function.name,
                                      json.loads(tool_call.function.arguments))
@@ -117,9 +133,12 @@ def run_agent(user_message, max_iterations=5):
 ### 2. LangGraph Workflow
 
 ```python
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
+from langchain_openai import ChatOpenAI
 from typing import TypedDict, Annotated
 import operator
+
+llm = ChatOpenAI(model="gpt-5-mini")
 
 class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
@@ -150,22 +169,33 @@ def writer(state: AgentState):
     )
     return {"messages": [response], "next_action": "end"}
 
-def router(state: AgentState):
-    return state["next_action"]
-
-# Build graph
+# Build graph. This pipeline is strictly linear, so use plain edges: a
+# conditional edge with a single destination adds a routing hop for nothing.
+# Reserve add_conditional_edges for real branches.
 workflow = StateGraph(AgentState)
 workflow.add_node("research", researcher)
 workflow.add_node("analyze", analyzer)
 workflow.add_node("write", writer)
 
-workflow.set_entry_point("research")
-workflow.add_conditional_edges("research", router, {"analyze": "analyze"})
-workflow.add_conditional_edges("analyze", router, {"write": "write"})
-workflow.add_conditional_edges("write", router, {"end": END})
+workflow.add_edge(START, "research")   # modern idiom; set_entry_point still works
+workflow.add_edge("research", "analyze")
+workflow.add_edge("analyze", "write")
+workflow.add_edge("write", END)
 
 app = workflow.compile()
 result = app.invoke({"messages": [{"role": "user", "content": "Research MLOps trends"}]})
+```
+
+For a plain tool-calling agent, do not hand-build the graph. LangGraph's
+`langgraph.prebuilt.create_react_agent` is deprecated in favour of
+`from langchain.agents import create_agent`, which takes a model string,
+middleware, and a checkpointer:
+
+```python
+from langchain.agents import create_agent
+
+agent = create_agent("openai:gpt-5-mini", tools=[search_database, get_weather])
+result = agent.invoke({"messages": [{"role": "user", "content": "Weather in Tokyo?"}]})
 ```
 
 ### 3. Multi-Agent with CrewAI
@@ -179,7 +209,7 @@ researcher = Agent(
     goal="Research the latest MLOps tools and best practices",
     backstory="Expert ML engineer with deep knowledge of MLOps ecosystem",
     tools=[search_tool, web_scraper],
-    llm="gpt-4o",
+    llm="gpt-5-mini",
 )
 
 architect = Agent(
@@ -187,14 +217,14 @@ architect = Agent(
     goal="Design scalable ML pipeline architectures",
     backstory="Senior architect who has designed ML platforms at scale",
     tools=[diagram_tool],
-    llm="gpt-4o",
+    llm="gpt-5-mini",
 )
 
 writer = Agent(
     role="Technical Writer",
     goal="Create clear technical documentation",
     backstory="Experienced technical writer specialized in ML documentation",
-    llm="gpt-4o",
+    llm="gpt-5-mini",
 )
 
 # Define tasks
@@ -297,14 +327,18 @@ class HumanInTheLoopAgent:
 ## Best Practices
 
 1. **Limit tool access** - Only give agents the tools they need
-2. **Set max iterations** - Prevent infinite loops
-3. **Implement timeouts** - Agents can get stuck
-4. **Log all actions** for debugging and audit
-5. **Use structured outputs** for tool arguments
-6. **Human-in-the-loop** for high-stakes actions
-7. **Test with adversarial inputs** - Agents can be manipulated
-8. **Monitor token usage** - Agents can be expensive
-9. **Use checkpoints** for long-running multi-step tasks
+2. **Never fake a sandbox** - `eval`/`exec` with a stripped `__builtins__` and a
+   blocklist of forbidden substrings is not isolation; both are escapable in one
+   line. Use an AST whitelist for arithmetic (see `scripts/build_agent.py`) and a
+   container or hosted code-interpreter service for real code execution.
+3. **Set max iterations** - Prevent infinite loops
+4. **Implement timeouts** - Agents can get stuck
+5. **Log all actions** for debugging and audit
+6. **Use structured outputs** for tool arguments (`strict: True`)
+7. **Human-in-the-loop** for high-stakes actions
+8. **Test with adversarial inputs** - Agents can be manipulated
+9. **Monitor token usage** - Agents can be expensive
+10. **Use checkpoints** for long-running multi-step tasks
 
 ## Scripts
 

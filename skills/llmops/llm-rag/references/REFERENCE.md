@@ -32,13 +32,14 @@
 |-------|-----------|------------|------------|-------|------|
 | OpenAI text-embedding-3-large | 3072 | 8191 | ~64.6 | Fast (API) | $0.13/1M tokens |
 | OpenAI text-embedding-3-small | 1536 | 8191 | ~62.3 | Fast (API) | $0.02/1M tokens |
-| Cohere embed-v3.0 | 1024 | 512 | ~64.5 | Fast (API) | $0.10/1M tokens |
-| BGE-large-en-v1.5 | 1024 | 512 | ~64.0 | Medium | Free (self-hosted) |
+| Cohere embed-v4.0 | 256-1536 (Matryoshka) | 128k | Strong multimodal | Fast (API) | $0.12/1M tokens |
+| Voyage voyage-3-large | 256-2048 (Matryoshka) | 32000 | Top-tier retrieval | Fast (API) | $0.18/1M tokens |
+| Gemini gemini-embedding-001 | 768-3072 | 2048 | Top MTEB multilingual | Fast (API) | $0.15/1M tokens |
+| Qwen3-Embedding-8B | 4096 | 32768 | ~70 (multilingual) | Slow | Free (GPU required) |
 | BGE-M3 | 1024 | 8192 | ~64.0 | Medium | Free (self-hosted) |
-| E5-mistral-7b | 4096 | 32768 | ~66.6 | Slow | Free (GPU required) |
 | all-MiniLM-L6-v2 | 384 | 256 | ~56.3 | Very Fast | Free (self-hosted) |
 
-**Selection**: API best quality = OpenAI large or Cohere v3. Self-hosted best quality = E5-mistral-7b (GPU) or BGE-M3. Speed/resource constrained = all-MiniLM-L6-v2. Multi-lingual = BGE-M3.
+**Selection**: API best quality = Voyage 3, Cohere v4, or Gemini embedding. Self-hosted best quality = Qwen3-Embedding (GPU) or BGE-M3. Speed/resource constrained = all-MiniLM-L6-v2. Multi-lingual = BGE-M3 or Qwen3-Embedding.
 
 ## Vector Databases Comparison
 
@@ -46,7 +47,7 @@
 |---------|--------|----------|----------|--------|--------|----------|
 | Type | Embedded | Managed SaaS | Self-hosted/Cloud | Self-hosted/Cloud | Self-hosted/Cloud | Postgres ext |
 | Scalability | Small-Medium | Large | Large | Large | Very Large | Medium |
-| Hybrid Search | No | Yes | Yes (BM25+vector) | Yes | Yes | No |
+| Hybrid Search | Limited (keyword filter) | Yes | Yes (BM25+vector) | Yes | Yes | Via Postgres FTS + RRF |
 | Multi-Tenancy | Via collections | Via namespaces | Native | Via collections | Via partitions | Via schemas/RLS |
 | Pricing | Free (OSS) | Per-pod/serverless | Free (OSS)/Cloud | Free (OSS)/Cloud | Free (OSS)/Cloud | Free |
 | Best For | Prototyping | Zero-ops production | Feature-rich apps | Performance-critical | Massive scale | Existing Postgres |

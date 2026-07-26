@@ -56,7 +56,7 @@ with mlflow.start_run(run_name="xgboost_v1") as run:
     for epoch, loss in enumerate(training_losses):
         mlflow.log_metric("train_loss", loss, step=epoch)
     mlflow.log_artifact("confusion_matrix.png")
-    mlflow.xgboost.log_model(model, artifact_path="model",
+    mlflow.xgboost.log_model(model, name="model",  # MLflow 3: name= replaces artifact_path
                               registered_model_name="churn_model")
 ```
 

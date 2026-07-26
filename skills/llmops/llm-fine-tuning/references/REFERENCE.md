@@ -63,7 +63,7 @@ target_modules = ["q_proj", "v_proj", "k_proj", "dense", "fc1", "fc2"]
 |--------|-----------|-----------|----------|
 | Alpaca | instruction/input/output JSON | Widely supported | Single-turn instruction tuning |
 | ShareGPT | conversations array with from/value | Axolotl, FastChat | Multi-turn chat fine-tuning |
-| ChatML | `<\|im_start\|>role\n content<\|im_end\|>` | OpenAI, Mistral | Production chat models |
+| ChatML | `<\|im_start\|>role\n content<\|im_end\|>` | OpenAI, Qwen | Production chat models |
 | Completion | Plain text with EOS tokens | All frameworks | Continued pre-training, base models |
 
 ### Format Examples
@@ -180,7 +180,7 @@ Note: Gradient checkpointing reduces memory by approximately 30% at the cost of 
 - [QLoRA: Efficient Finetuning of Quantized LLMs (Dettmers et al., 2023)](https://arxiv.org/abs/2305.14314)
 - [DoRA: Weight-Decomposed Low-Rank Adaptation (Liu et al., 2024)](https://arxiv.org/abs/2402.09353)
 - [DPO: Direct Preference Optimization (Rafailov et al., 2023)](https://arxiv.org/abs/2305.18290)
-- [Axolotl Fine-Tuning Framework](https://github.com/OpenAccess-AI-Collective/axolotl)
+- [Axolotl Fine-Tuning Framework](https://github.com/axolotl-ai-cloud/axolotl)
 - [Unsloth: 2x Faster Fine-Tuning](https://github.com/unslothai/unsloth)
 - [LLaMA-Factory: Unified Fine-Tuning Framework](https://github.com/hiyouga/LLaMA-Factory)
 - [Hugging Face TRL (Transformer Reinforcement Learning)](https://huggingface.co/docs/trl)

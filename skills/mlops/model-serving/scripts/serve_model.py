@@ -107,11 +107,12 @@ PREDICTORS = {
 
 def build_app(args):
     """Construct the FastAPI application with all endpoints."""
+    from collections import deque
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.responses import JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field
-
-    app = FastAPI(title="Model Serving API", version="1.0.0")
 
     # ---- State ----
     state = {
@@ -121,9 +122,21 @@ def build_app(args):
         "ab_ratio": args.ab_ratio,
         "request_count": 0,
         "error_count": 0,
-        "latencies": [],
+        # bounded so long-running servers don't grow memory without limit
+        "latencies": deque(maxlen=10_000),
         "startup_time": time.time(),
     }
+
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        logger.info(
+            "Shutting down -- served %d requests, %d errors",
+            state["request_count"],
+            state["error_count"],
+        )
+
+    app = FastAPI(title="Model Serving API", version="1.0.0", lifespan=lifespan)
     if args.model_b_path:
         state["model_b"] = LOADERS[args.framework](args.model_b_path)
         logger.info("A/B testing enabled -- %.0f%% traffic to model B", args.ab_ratio * 100)
@@ -223,7 +236,7 @@ def build_app(args):
         lines = []
         lines.append(f'model_serving_requests_total {state["request_count"]}')
         lines.append(f'model_serving_errors_total {state["error_count"]}')
-        lats = state["latencies"] or [0]
+        lats = list(state["latencies"]) or [0]
         arr = np.array(lats)
         lines.append(f"model_serving_latency_p50_ms {float(np.percentile(arr, 50)):.2f}")
         lines.append(f"model_serving_latency_p95_ms {float(np.percentile(arr, 95)):.2f}")
@@ -234,15 +247,6 @@ def build_app(args):
         lines.append(f"model_serving_cache_size {_cached_predict.cache_info().currsize}")
         lines.append(f"model_serving_cache_hits {_cached_predict.cache_info().hits}")
         return "\n".join(lines) + "\n"
-
-    # ---- Graceful shutdown ----
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        logger.info(
-            "Shutting down -- served %d requests, %d errors",
-            state["request_count"],
-            state["error_count"],
-        )
 
     return app
 
@@ -261,7 +265,9 @@ def parse_args(argv=None):
     )
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (default 8000)")
-    parser.add_argument("--workers", type=int, default=1, help="Uvicorn worker count")
+    # Note: no --workers flag. uvicorn.run() silently ignores workers>1 when
+    # passed an app object (it requires an import string). To scale out, run
+    # multiple instances behind a load balancer or use a gunicorn+uvicorn setup.
     parser.add_argument("--model-b-path", default=None, help="Path to model B for A/B testing")
     parser.add_argument(
         "--ab-ratio",
@@ -289,8 +295,8 @@ def main(argv=None):
     # Register SIGTERM for graceful shutdown
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
-    logger.info("Starting server on %s:%d (workers=%d)", args.host, args.port, args.workers)
-    uvicorn.run(app, host=args.host, port=args.port, workers=args.workers, log_level="info")
+    logger.info("Starting server on %s:%d", args.host, args.port)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

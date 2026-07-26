@@ -2,10 +2,10 @@
 """LLM cost optimization toolkit - estimate, route, compress, and report on LLM API costs.
 
 Usage:
-    python cost_optimizer.py --action estimate --input prompts.jsonl --models gpt-4o,claude-3.5-sonnet
+    python cost_optimizer.py --action estimate --input prompts.jsonl --models gpt-5,claude-sonnet-5
     python cost_optimizer.py --action route --input prompts.jsonl --budget 5.00
     python cost_optimizer.py --action compress --input prompts.jsonl --output compressed.jsonl
-    python cost_optimizer.py --action report --input prompts.jsonl --models gpt-4o,gpt-4o-mini --output report.json
+    python cost_optimizer.py --action report --input prompts.jsonl --models gpt-5,gpt-5-mini --output report.json
 """
 import argparse
 import json
@@ -17,29 +17,56 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Model pricing: USD per 1M tokens, plus a relative quality score (0-1)
+# Model pricing: USD per 1M tokens (verified 2026-07 - re-check provider pages),
+# plus a coarse relative quality score (0-1) used only for routing comparisons.
+# Model IDs are the real API identifiers, not families.
 MODEL_PRICING = {
-    "gpt-4o":            {"input": 2.50,  "output": 10.00, "quality": 0.95},
-    "gpt-4o-mini":       {"input": 0.15,  "output": 0.60,  "quality": 0.82},
-    "claude-3.5-sonnet": {"input": 3.00,  "output": 15.00, "quality": 0.96},
-    "claude-haiku":      {"input": 0.25,  "output": 1.25,  "quality": 0.78},
-    "llama-3":           {"input": 0.05,  "output": 0.08,  "quality": 0.75},
-    "mistral":           {"input": 0.10,  "output": 0.30,  "quality": 0.73},
+    "claude-opus-5":    {"input": 5.00,  "output": 25.00, "quality": 0.97},
+    "claude-sonnet-5":  {"input": 3.00,  "output": 15.00, "quality": 0.95},
+    "claude-haiku-4-5": {"input": 1.00,  "output": 5.00,  "quality": 0.86},
+    "gpt-5":            {"input": 1.25,  "output": 10.00, "quality": 0.94},
+    "gpt-5-mini":       {"input": 0.25,  "output": 2.00,  "quality": 0.85},
+    "gpt-4.1-mini":     {"input": 0.40,  "output": 1.60,  "quality": 0.80},
+    "llama-4-scout":    {"input": 0.80,  "output": 2.40,  "quality": 0.78},
 }
 
-_COMPLEX_RE = re.compile(
-    r"(explain|analyze|compare|contrast|summarize .{200,}|write code|debug|refactor|translate)",
+# Bare verbs like "explain" appear in the simplest questions, so they are weak
+# signals. Require either a strong signal or a verb plus a substantial prompt;
+# see _task_complexity for how the two tiers are weighted.
+_STRONG_COMPLEX_RE = re.compile(
+    r"(write\s+code|debug|refactor|implement|prove|derive|step[- ]by[- ]step|"
+    r"trade[- ]?offs?|architecture)",
     re.IGNORECASE,
 )
+_WEAK_COMPLEX_RE = re.compile(
+    r"(explain|analyz[es]|analys[es]|compare|contrast|summari[sz]e|translate|evaluate)",
+    re.IGNORECASE,
+)
+_WEAK_SIGNAL_MIN_WORDS = 40
+_TOKENIZER_WARNED = set()
 
 
-def count_tokens(text, model="gpt-4o"):
-    """Count tokens via tiktoken if available, otherwise ~words/0.75 fallback."""
+def count_tokens(text, model="gpt-5-mini"):
+    """Count tokens via tiktoken if available, otherwise a words/0.75 fallback.
+
+    tiktoken only ships OpenAI tokenizers, so Claude/Llama models fall through to
+    the heuristic (logged once per model). For exact Claude counts use
+    client.messages.count_tokens(model=..., messages=[...]).
+    """
     try:
         import tiktoken
-        return len(tiktoken.encoding_for_model(model).encode(text))
-    except Exception:
+    except ImportError:
         return max(1, int(len(text.split()) / 0.75))
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        if model not in _TOKENIZER_WARNED:
+            _TOKENIZER_WARNED.add(model)
+            logger.warning(
+                f"tiktoken has no tokenizer for '{model}' (non-OpenAI model); "
+                f"using a words/0.75 estimate. Token counts are approximate.")
+        return max(1, int(len(text.split()) / 0.75))
+    return len(enc.encode(text))
 
 
 def estimate_cost(prompts, models=None, avg_output_ratio=1.5):
@@ -63,34 +90,51 @@ def estimate_cost(prompts, models=None, avg_output_ratio=1.5):
 
 
 def _task_complexity(prompt):
-    """Heuristic complexity score in [0, 1] based on length, vocab, patterns."""
+    """Heuristic complexity score in [0, 1] based on length, vocab, patterns.
+
+    Weights are a hand-tuned starting point, not a calibrated model. Validate
+    routing decisions against your own labelled prompts before trusting them.
+    """
     words = len(prompt.split())
-    score = min(words / 500, 0.4)
+    score = min(words / 500, 0.4)                       # length, up to 0.4
     unique = len(set(prompt.lower().split()))
-    score += min((unique / max(words, 1)) * 0.3, 0.3)
-    if _COMPLEX_RE.search(prompt):
+    score += min((unique / max(words, 1)) * 0.3, 0.3)   # vocab richness, up to 0.3
+    if _STRONG_COMPLEX_RE.search(prompt):
         score += 0.3
+    elif _WEAK_COMPLEX_RE.search(prompt) and words >= _WEAK_SIGNAL_MIN_WORDS:
+        # "explain"/"compare" on their own describe one-line questions too, so
+        # they only count when the prompt itself has some substance.
+        score += 0.15
     return min(score, 1.0)
 
 
-def route_request(prompt, budget_per_request=None, quality_floor=0.0):
+def route_request(prompt, budget_per_request=None, quality_floor=0.0,
+                  avg_output_ratio=1.5):
     """Route a prompt to the cheapest model that meets a quality threshold
     derived from task complexity.  Short/simple -> cheap; long/complex -> premium."""
     complexity = _task_complexity(prompt)
     min_quality = max(quality_floor, complexity * 0.95)
     input_tokens = count_tokens(prompt)
+    output_tokens = input_tokens * avg_output_ratio
     candidates = []
     for name, info in MODEL_PRICING.items():
         if info["quality"] < min_quality:
             continue
-        est = (input_tokens * info["input"] + input_tokens * 1.5 * info["output"]) / 1_000_000
+        est = (input_tokens * info["input"] + output_tokens * info["output"]) / 1_000_000
         if budget_per_request and est > budget_per_request:
             continue
         candidates.append((name, est, info["quality"]))
     if not candidates:
-        cheapest = min(MODEL_PRICING.items(), key=lambda x: x[1]["input"])
-        return {"model": cheapest[0], "reason": "budget_fallback",
-                "complexity": round(complexity, 3)}
+        # Nothing fits: fall back to the cheapest model by total estimated cost
+        # (input+output), not by input price alone.
+        def _total(item):
+            info = item[1]
+            return (input_tokens * info["input"] + output_tokens * info["output"]) / 1_000_000
+        name, info = min(MODEL_PRICING.items(), key=_total)
+        est = (input_tokens * info["input"] + output_tokens * info["output"]) / 1_000_000
+        return {"model": name, "estimated_cost_usd": round(est, 8),
+                "quality": info["quality"], "complexity": round(complexity, 3),
+                "reason": "budget_fallback"}
     candidates.sort(key=lambda x: x[1])
     c = candidates[0]
     return {"model": c[0], "estimated_cost_usd": round(c[1], 8),
@@ -117,7 +161,7 @@ def compress_prompt(text, max_tokens=None):
     return out
 
 
-def batch_vs_realtime(prompts, model="gpt-4o", batch_discount=0.50):
+def batch_vs_realtime(prompts, model="gpt-5-mini", batch_discount=0.50):
     """Compare batch (async, discounted) vs real-time API cost."""
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
@@ -222,9 +266,10 @@ def main():
             saved += orig - new
             compressed.append({"prompt": c, "original_tokens": orig,
                                "compressed_tokens": new})
-        result = compressed
+        # Same shape to stdout and to --output.
+        result = {"total_tokens_saved": saved, "prompts": compressed}
         logger.info(f"Total tokens saved: {saved}")
-        print(json.dumps({"total_tokens_saved": saved, "prompts": result}, indent=2))
+        print(json.dumps(result, indent=2))
 
     elif args.action == "report":
         result = generate_report(prompts, models,

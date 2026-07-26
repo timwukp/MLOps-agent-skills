@@ -122,20 +122,20 @@ torchrun --nproc_per_node=4 --nnodes=2 --node_rank=0 \
 - **tf32**: Automatic on Ampere+ GPUs for matmul operations. No code changes required.
 
 ```python
-# PyTorch AMP with fp16
-from torch.cuda.amp import autocast, GradScaler
-scaler = GradScaler()
+# PyTorch AMP with fp16 (torch.cuda.amp is deprecated; use torch.amp)
+from torch.amp import autocast, GradScaler
+scaler = GradScaler("cuda")
 
 for batch in dataloader:
     optimizer.zero_grad()
-    with autocast(dtype=torch.float16):
+    with autocast("cuda", dtype=torch.float16):
         loss = model(batch)
     scaler.scale(loss).backward()
     scaler.step(optimizer)
     scaler.update()
 
 # PyTorch AMP with bf16 (no scaler needed)
-with autocast(dtype=torch.bfloat16):
+with autocast("cuda", dtype=torch.bfloat16):
     loss = model(batch)
 loss.backward()
 optimizer.step()
@@ -230,9 +230,34 @@ cosine = CosineAnnealingLR(optimizer, T_max=total_steps - 500, eta_min=1e-6)
 scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[500])
 ```
 
+## Managed Training: AWS SageMaker (SDK v3)
+
+The SageMaker Python SDK v3 (2025-11) **removed** `Estimator`, `Model`, `Predictor`
+and all framework subclasses (`SKLearn`, `PyTorch`, ...). Training jobs now use
+`ModelTrainer`; code written against v2 `Estimator` fails to import on v3.
+
+```python
+# sagemaker >= 3.0
+from sagemaker.train import ModelTrainer
+from sagemaker.train.configs import SourceCode, Compute
+
+trainer = ModelTrainer(
+    training_image="763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-training:2.5-gpu-py311",
+    source_code=SourceCode(source_dir="./src", entry_script="train.py"),
+    compute=Compute(instance_type="ml.g5.xlarge", instance_count=1),
+)
+trainer.train(input_data_config=[...])
+```
+
+For simple artifact workflows, plain boto3 + packaging the trained model as
+`model.tar.gz` on S3 (validated pattern — see model-registry / model-serving skills)
+avoids the SDK dependency entirely. Managed Spot Training gives up to ~90% savings
+with automatic checkpoint/resume via the `checkpoint_s3_uri` config.
+
 ## Further Reading
 
 - [PyTorch Distributed Training Guide](https://pytorch.org/tutorials/intermediate/ddp_tutorial.html)
+- [SageMaker Python SDK v3 ModelTrainer](https://sagemaker.readthedocs.io/)
 - [DeepSpeed Documentation](https://www.deepspeed.ai/getting-started/)
 - [Optuna Documentation](https://optuna.readthedocs.io/)
 - [Ray Tune User Guide](https://docs.ray.io/en/latest/tune/index.html)

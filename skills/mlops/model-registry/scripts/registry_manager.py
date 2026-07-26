@@ -2,19 +2,20 @@
 """MLflow Model Registry management script.
 
 Provides CLI operations for managing the full model lifecycle:
-registering models from runs, promoting through stages, comparing
-versions, inspecting lineage, and cleaning up archived versions.
+registering models from runs, promoting via aliases (the stages API is
+deprecated since MLflow 2.9), comparing versions, inspecting lineage,
+and cleaning up archived versions.
 
 Usage examples:
     # Register a model from a completed MLflow run
     python registry_manager.py --action register --model-name fraud-detector \
         --run-id abc123def456 --artifact-path model
 
-    # Promote a model version to Staging
+    # Promote a model version by assigning an alias
     python registry_manager.py --action promote --model-name fraud-detector \
-        --version 3 --stage Staging
+        --version 3 --alias staging
 
-    # Archive a model version
+    # Archive a model version (tags it status=archived)
     python registry_manager.py --action archive --model-name fraud-detector \
         --version 2
 
@@ -83,32 +84,30 @@ def register_model(model_name: str, run_id: str, artifact_path: str = "model"):
     return result
 
 
-def promote_model(model_name: str, version: int, stage: str):
-    """Transition a model version to a new stage."""
-    valid_stages = {"None", "Staging", "Production", "Archived"}
-    if stage not in valid_stages:
-        logger.error("Invalid stage '%s'. Must be one of %s", stage, valid_stages)
-        sys.exit(1)
+def promote_model(model_name: str, version: int, alias: str):
+    """Assign an alias (e.g. 'staging', 'champion') to a model version.
 
+    Aliases replace the deprecated stages API: reassigning an alias
+    automatically removes it from the version that previously held it.
+    """
     client = _get_client()
-    logger.info(
-        "Transitioning '%s' v%s -> %s", model_name, version, stage
-    )
-    updated = client.transition_model_version_stage(
+    logger.info("Assigning alias '@%s' to '%s' v%s", alias, model_name, version)
+    client.set_registered_model_alias(
         name=model_name,
+        alias=alias,
         version=str(version),
-        stage=stage,
-        archive_existing_versions=(stage == "Production"),
     )
-    logger.info(
-        "Version %s is now in stage '%s'", updated.version, updated.current_stage
-    )
+    updated = client.get_model_version(model_name, str(version))
+    logger.info("Version %s now has aliases %s", updated.version, list(updated.aliases))
     return updated
 
 
 def archive_model(model_name: str, version: int):
-    """Shortcut to archive a specific model version."""
-    return promote_model(model_name, version, "Archived")
+    """Mark a model version as archived via a tag (aliases have no Archived state)."""
+    client = _get_client()
+    client.set_model_version_tag(model_name, str(version), "status", "archived")
+    logger.info("Tagged '%s' v%s with status=archived", model_name, version)
+    return client.get_model_version(model_name, str(version))
 
 
 def compare_versions(model_name: str, versions: list[int]):
@@ -122,7 +121,7 @@ def compare_versions(model_name: str, versions: list[int]):
         rows.append(
             {
                 "version": ver,
-                "stage": mv.current_stage,
+                "aliases": ",".join(mv.aliases) or "-",
                 "run_id": mv.run_id,
                 "metrics": run.data.metrics,
                 "params": run.data.params,
@@ -145,10 +144,10 @@ def compare_versions(model_name: str, versions: list[int]):
         )
         print(f"{metric:<30}{vals}")
 
-    # Stage info
+    # Alias info
     print()
-    stage_row = "".join(f"{r['stage']:<16}" for r in rows)
-    print(f"{'Stage':<30}{stage_row}")
+    alias_row = "".join(f"{r['aliases']:<16}" for r in rows)
+    print(f"{'Aliases':<30}{alias_row}")
     print()
 
 
@@ -163,33 +162,32 @@ def list_versions(model_name: str):
 
     print(f"\nModel: {model_name}  ({len(versions)} version(s))\n")
     print(
-        f"{'Version':<10}{'Stage':<15}{'Status':<12}{'Run ID':<36}{'Created'}"
+        f"{'Version':<10}{'Aliases':<15}{'Status':<12}{'Run ID':<36}{'Created'}"
     )
     print("-" * 95)
     for mv in sorted(versions, key=lambda v: int(v.version)):
         created = datetime.fromtimestamp(
             mv.creation_timestamp / 1000, tz=timezone.utc
         ).strftime("%Y-%m-%d %H:%M UTC")
+        aliases = ",".join(mv.aliases) or "-"
         print(
-            f"{mv.version:<10}{mv.current_stage:<15}{mv.status:<12}"
+            f"{mv.version:<10}{aliases:<15}{mv.status:<12}"
             f"{mv.run_id:<36}{created}"
         )
     print()
 
 
-def get_production_model(model_name: str):
-    """Print details of the current Production version."""
+def get_production_model(model_name: str, alias: str = "champion"):
+    """Print details of the version currently holding the production alias."""
     client = _get_client()
-    versions = client.search_model_versions(f"name='{model_name}'")
-    prod = [v for v in versions if v.current_stage == "Production"]
-
-    if not prod:
-        logger.warning("No Production version found for '%s'", model_name)
+    try:
+        mv = client.get_model_version_by_alias(model_name, alias)
+    except Exception:
+        logger.warning("No '@%s' version found for '%s'", alias, model_name)
         return None
 
-    mv = prod[0]
     run = client.get_run(mv.run_id)
-    print(f"\nProduction model: {model_name} v{mv.version}")
+    print(f"\nProduction model: {model_name} v{mv.version} (@{alias})")
     print(f"  Run ID      : {mv.run_id}")
     print(f"  Description : {mv.description or '(none)'}")
     print(f"  Tags        : {dict(mv.tags) if mv.tags else '{}'}")
@@ -217,11 +215,11 @@ def describe_version(
 
 
 def cleanup_archived(model_name: str, keep: int = 1):
-    """Delete old Archived versions, retaining the most recent *keep*."""
+    """Delete old archived versions (tag status=archived), retaining the most recent *keep*."""
     client = _get_client()
     versions = client.search_model_versions(f"name='{model_name}'")
     archived = sorted(
-        [v for v in versions if v.current_stage == "Archived"],
+        [v for v in versions if v.tags.get("status") == "archived"],
         key=lambda v: int(v.version),
         reverse=True,
     )
@@ -247,7 +245,7 @@ def show_lineage(model_name: str, version: int):
     print(f"\nLineage for {model_name} v{version}")
     print(f"  Run ID  : {mv.run_id}")
     print(f"  Source  : {mv.source}")
-    print(f"  Stage   : {mv.current_stage}")
+    print(f"  Aliases : {','.join(mv.aliases) or '-'}")
 
     print("\n  Parameters:")
     for k, v in sorted(run.data.params.items()):
@@ -281,7 +279,7 @@ def _parse_args(argv=None):
     parser.add_argument("--model-name", required=True, help="Registered model name")
     parser.add_argument("--version", type=int, help="Model version number")
     parser.add_argument("--versions", help="Comma-separated versions to compare")
-    parser.add_argument("--stage", help="Target stage for promotion")
+    parser.add_argument("--alias", help="Alias to assign for promotion (e.g. staging, champion)")
     parser.add_argument("--run-id", help="MLflow run ID (for register)")
     parser.add_argument("--artifact-path", default="model", help="Artifact sub-path")
     parser.add_argument("--description", help="Version description text")
@@ -304,10 +302,10 @@ def main(argv=None):
             register_model(args.model_name, args.run_id, args.artifact_path)
 
         elif args.action == "promote":
-            if args.version is None or not args.stage:
-                logger.error("--version and --stage are required for promote")
+            if args.version is None or not args.alias:
+                logger.error("--version and --alias are required for promote")
                 sys.exit(1)
-            promote_model(args.model_name, args.version, args.stage)
+            promote_model(args.model_name, args.version, args.alias)
 
         elif args.action == "archive":
             if args.version is None:

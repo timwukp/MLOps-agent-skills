@@ -42,7 +42,11 @@ def load_documents(docs_dir):
 
 
 def chunk_documents(docs, chunk_size=512, chunk_overlap=50):
-    """Split documents into chunks."""
+    """Split documents into chunks.
+
+    Note: chunk_size/chunk_overlap are measured in whitespace-separated words,
+    not tokens (roughly 1 word ~ 1.3 tokens for English text).
+    """
     chunks = []
     for doc in docs:
         text = doc["text"]
@@ -111,7 +115,8 @@ def query_rag(question, db_path, top_k=5, embedding_model="all-MiniLM-L6-v2"):
             "rank": i + 1,
             "text": doc,
             "source": metadata.get("source", "unknown"),
-            "score": round(1 - distance, 4),
+            # 1 - distance assumes cosine distance; clamp so other metrics can't go negative
+            "score": round(max(0.0, 1 - distance), 4),
         })
 
     # Build context
@@ -125,7 +130,7 @@ def query_rag(question, db_path, top_k=5, embedding_model="all-MiniLM-L6-v2"):
     }
 
 
-def generate_answer(question, context, model_name="gpt-4o-mini"):
+def generate_answer(question, context, model_name="gpt-5-mini"):
     """Generate answer using LLM with retrieved context."""
     try:
         from openai import OpenAI
@@ -163,7 +168,7 @@ def main():
     q_parser.add_argument("--question", required=True, help="Question to ask")
     q_parser.add_argument("--top-k", type=int, default=5)
     q_parser.add_argument("--generate", action="store_true", help="Generate answer with LLM")
-    q_parser.add_argument("--model", default="gpt-4o-mini")
+    q_parser.add_argument("--model", default="gpt-5-mini")
 
     args = parser.parse_args()
 

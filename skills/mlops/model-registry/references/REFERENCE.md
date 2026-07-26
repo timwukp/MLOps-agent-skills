@@ -196,9 +196,52 @@ with mlflow.start_run():
 4. **Ignoring model size**: Large models increase deployment cost and latency. Track artifact size.
 5. **No rollback plan**: Always keep the previous production model version readily accessible.
 
+## Managed Registry: AWS SageMaker Model Registry
+
+The same register → gate → promote workflow maps directly onto SageMaker Model
+Package Groups. Registration and approval-status APIs are free; only the S3
+artifact storage costs money.
+
+```python
+# Validated end-to-end on a live AWS account
+import boto3
+
+sm = boto3.client("sagemaker")
+sm.create_model_package_group(ModelPackageGroupName="churn-model")
+
+resp = sm.create_model_package(
+    ModelPackageGroupName="churn-model",
+    ModelApprovalStatus="PendingManualApproval",   # register as pending
+    InferenceSpecification={
+        "Containers": [{"Image": image_uri, "ModelDataUrl": "s3://bucket/model.tar.gz"}],
+        "SupportedContentTypes": ["text/csv"],
+        "SupportedResponseMIMETypes": ["text/csv"],
+    },
+    CustomerMetadataProperties={"accuracy": "0.94", "git_sha": "abc123"},
+)
+
+# Promotion gate: quality checks pass -> approve (equivalent of alias promotion)
+sm.update_model_package(
+    ModelPackageArn=resp["ModelPackageArn"],
+    ModelApprovalStatus="Approved",
+)
+
+# Latest approved version for deployment
+versions = sm.list_model_packages(
+    ModelPackageGroupName="churn-model",
+    ModelApprovalStatus="Approved",
+    SortBy="CreationTime", SortOrder="Descending",
+)["ModelPackageSummaryList"]
+```
+
+`ModelApprovalStatus` (`PendingManualApproval` → `Approved`/`Rejected`) plays the role
+of MLflow aliases; `CustomerMetadataProperties` carries lineage tags. An EventBridge rule
+on the approval-state change is the standard trigger for automated deployment pipelines.
+
 ## Further Reading
 
 - [MLflow Model Registry Docs](https://mlflow.org/docs/latest/model-registry.html)
+- [SageMaker Model Registry](https://docs.aws.amazon.com/sagemaker/latest/dg/model-registry.html)
 - [DVC Model Registry](https://dvc.org/doc/use-cases/model-registry)
 - [W&B Model Registry](https://docs.wandb.ai/guides/model-registry)
 - [ONNX Specification](https://onnx.ai/onnx/intro/)

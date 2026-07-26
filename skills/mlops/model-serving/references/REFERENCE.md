@@ -4,13 +4,13 @@
 
 | Feature           | FastAPI        | BentoML          | Triton           | TF Serving       | TorchServe       | Seldon Core      |
 |-------------------|---------------|------------------|------------------|------------------|------------------|------------------|
-| Framework Support | Any           | Any              | TF, PyTorch, ONNX| TensorFlow only  | PyTorch only     | Any              |
+| Framework Support | Any           | Any              | TF, PyTorch, ONNX, TensorRT, OpenVINO, Python, FIL, vLLM | TensorFlow only  | PyTorch only     | Any              |
 | Batching          | Manual        | Adaptive         | Dynamic          | Built-in         | Built-in         | Built-in         |
 | GPU Support       | Manual        | Yes              | Best-in-class    | Yes              | Yes              | Yes              |
 | Model Ensemble    | Manual        | Service graph    | Ensemble pipeline| No               | Workflow DAG     | Inference graph  |
 | gRPC Support      | No            | Yes              | Yes              | Yes              | Yes              | Yes              |
 | Learning Curve    | Low           | Low              | High             | Medium           | Medium           | High             |
-| Best For          | Prototypes    | General purpose  | High-perf GPU    | TF ecosystem     | PyTorch ecosystem| K8s-native ML    |
+| Best For          | Prototypes    | General purpose  | High-perf GPU    | TF ecosystem     | Existing deployments (limited maintenance) | K8s-native ML    |
 
 ### When to Choose What
 
@@ -18,7 +18,7 @@
 - **BentoML**: General-purpose, batteries-included solution with easy packaging.
 - **Triton**: Maximum GPU utilization, multi-model serving, dynamic batching critical.
 - **TF Serving**: TensorFlow-only shops needing proven production stability.
-- **TorchServe**: PyTorch-only shops needing model versioning and A/B testing.
+- **TorchServe**: PyTorch-only shops with existing deployments. Note: TorchServe is in limited-maintenance mode (no new features planned); prefer Triton or BentoML for new PyTorch deployments.
 - **Seldon Core**: Kubernetes-native teams needing complex inference graphs.
 
 ## Deployment Patterns
@@ -207,12 +207,69 @@ spec:
 4. **Shared GPU without limits**: Multiple models on one GPU without memory limits leads to OOM crashes.
 5. **No graceful shutdown**: Implement SIGTERM handling to drain in-flight requests before termination.
 
+## Managed Serving: AWS SageMaker
+
+For teams that want managed infrastructure instead of running FastAPI/K8s themselves.
+Serverless Inference bills per-invocation with zero idle cost — good for spiky or low-volume
+traffic; use Real-Time endpoints for sustained load and latency SLOs.
+
+```python
+# Validated end-to-end on a live AWS account (boto3; sklearn managed container)
+import boto3
+
+sm = boto3.client("sagemaker")
+sm.create_model(
+    ModelName="my-model",
+    PrimaryContainer={
+        "Image": "683313688378.dkr.ecr.us-east-1.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3",
+        "ModelDataUrl": "s3://bucket/model.tar.gz",
+        "Environment": {
+            "SAGEMAKER_PROGRAM": "inference.py",
+            "SAGEMAKER_SUBMIT_DIRECTORY": "s3://bucket/model.tar.gz",
+        },
+    },
+    ExecutionRoleArn=role_arn,
+)
+sm.create_endpoint_config(
+    EndpointConfigName="my-model",
+    ProductionVariants=[{
+        "VariantName": "AllTraffic",
+        "ModelName": "my-model",
+        "ServerlessConfig": {"MemorySizeInMB": 1024, "MaxConcurrency": 1},
+    }],
+)
+sm.create_endpoint(EndpointName="my-model", EndpointConfigName="my-model")
+sm.get_waiter("endpoint_in_service").wait(EndpointName="my-model")
+```
+
+**Packaging gotcha (verified on a live endpoint):** when you wire the container env vars
+by hand via boto3 and point `SAGEMAKER_SUBMIT_DIRECTORY` at the model tarball itself, the
+sklearn container pip-installs the **archive root** as the inference module directory —
+`inference.py` must sit at the tarball root, not under `code/`. The `code/inference.py`
+layout only applies when the SageMaker Python SDK repacks the model for you
+(`SKLearnModel(...)` path). Getting this wrong fails with
+`ModuleNotFoundError: No module named 'inference'` only at endpoint creation, minutes
+after the (successful) `create_model` call.
+
+`inference.py` contract for the sklearn container — implement `model_fn` (required);
+`input_fn`/`predict_fn`/`output_fn` are optional with CSV/JSON defaults:
+
+```python
+import os, joblib
+
+def model_fn(model_dir):
+    return joblib.load(os.path.join(model_dir, "model.joblib"))
+```
+
+Always delete endpoint + endpoint-config + model when done — Real-Time endpoints bill
+per hour whether or not they receive traffic (Serverless does not).
+
 ## Further Reading
 
 - [BentoML Documentation](https://docs.bentoml.com/)
 - [Triton Inference Server Guide](https://docs.nvidia.com/deeplearning/triton-inference-server/)
 - [KServe Documentation](https://kserve.github.io/website/)
-- [TorchServe Documentation](https://pytorch.org/serve/)
+- [TorchServe Documentation](https://pytorch.org/serve/) (limited maintenance)
 - [ONNX Runtime Performance Tuning](https://onnxruntime.ai/docs/performance/)
 - [Seldon Core Documentation](https://docs.seldon.io/projects/seldon-core/en/latest/)
 - [Kubernetes HPA Documentation](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)

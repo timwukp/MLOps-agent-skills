@@ -8,20 +8,56 @@ Usage:
     python curate_dataset.py --input data.jsonl --action clean --output cleaned.jsonl
     python curate_dataset.py --input data.jsonl --action split --val-ratio 0.1 --test-ratio 0.1 --output splits/
 """
-import argparse, csv, hashlib, json, logging, random, re, sys
+import argparse, copy, csv, hashlib, json, logging, random, re, sys
 from collections import Counter
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+# Octet-constrained so version strings ("1.2.300.4") and arbitrary dotted numbers
+# do not register as IP addresses.
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+
+# Redaction order matters: longest/most specific first, so the phone pattern
+# cannot eat 10 digits out of a card number and leave the rest in the clear.
+# Python dicts preserve insertion order and remove_pii relies on it.
 PII_PATTERNS = {
-    "email": re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"),
-    "phone_us": re.compile(r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
+    "credit_card": re.compile(r"\b(?:\d[ -]?){12,18}\d\b"),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-    "credit_card": re.compile(r"\b(?:\d[ -]*?){13,16}\b"),
-    "ip_address": re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"),
+    "phone_us": re.compile(r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
+    "ip_address": re.compile(rf"\b{_OCTET}\.{_OCTET}\.{_OCTET}\.{_OCTET}\b"),
+    "email": re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"),
 }
+# Patterns that need a structural check beyond the regex before being called PII.
+_VALIDATORS = {}
+
+
+def _luhn_ok(digits):
+    """Luhn (mod-10) checksum, the standard validity test for card numbers."""
+    if not 13 <= len(digits) <= 19:
+        return False
+    total, parity = 0, len(digits) % 2
+    for i, ch in enumerate(digits):
+        d = int(ch)
+        if i % 2 == parity:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _is_credit_card(match_text):
+    """A 13-16 digit run is only a card number if it passes Luhn.
+
+    Without this, order numbers, timestamps, and long IDs all get redacted as
+    credit cards - a large false-positive rate on ordinary training data.
+    """
+    return _luhn_ok(re.sub(r"\D", "", match_text))
+
+
+_VALIDATORS["credit_card"] = _is_credit_card
 
 
 def load_data(input_path):
@@ -92,12 +128,30 @@ def deduplicate(records, threshold=0.8):
     return unique
 
 
+# score_quality weights. These are heuristic defaults, not learned parameters:
+# tune them against your own labelled sample before gating a dataset on them.
+QUALITY_WEIGHTS = {"instruction_length": 0.20, "response_length": 0.30,
+                   "non_repetition": 0.25, "formatting": 0.25}
+# Word counts at which the length components saturate.
+TARGET_INSTRUCTION_WORDS = 15
+TARGET_RESPONSE_WORDS = 80
+# Repetition penalty slope: rep >= 0.2 (a fifth of bigrams repeated) scores 0.
+REPETITION_PENALTY = 5
+# Markdown list/heading markers, anchored to line starts so "3.14" and "x - y"
+# inside prose do not count as structure.
+_STRUCTURE_RE = re.compile(r"(^|\n)\s*(```|[-*+]\s|#{1,6}\s|\d+[.)]\s)")
+
+
 def score_quality(rec):
     """Compute quality scores: instruction/response length, repetition rate, formatting."""
     instr = rec.get("instruction", "")
     resp = rec.get("response", rec.get("output", ""))
     if not instr and not resp:
-        t = _text_of(rec); instr, resp = t[:len(t)//2], t[len(t)//2:]
+        # Fall back to splitting the record text on a word boundary near the
+        # midpoint, rather than slicing mid-word.
+        words = _text_of(rec).split()
+        half = len(words) // 2
+        instr, resp = " ".join(words[:half]), " ".join(words[half:])
     iw, rw = len(instr.split()), len(resp.split())
     # Perplexity proxy: repeated bigram rate
     words = resp.lower().split()
@@ -109,11 +163,15 @@ def score_quality(rec):
         rep = 0.0
     # Formatting quality
     fmt = 0.5
-    if any(m in resp for m in ["```", "- ", "1.", "* ", "## "]): fmt += 0.2
+    if _STRUCTURE_RE.search(resp): fmt += 0.2
     if len(resp.split("\n")) > 1: fmt += 0.15
     if resp.strip() and resp.strip()[-1] in ".!?)\"'": fmt += 0.15
     fmt = min(fmt, 1.0)
-    overall = min(iw/15, 1)*0.2 + min(rw/80, 1)*0.3 + max(0, 1-rep*5)*0.25 + fmt*0.25
+    w = QUALITY_WEIGHTS
+    overall = (min(iw / TARGET_INSTRUCTION_WORDS, 1) * w["instruction_length"]
+               + min(rw / TARGET_RESPONSE_WORDS, 1) * w["response_length"]
+               + max(0, 1 - rep * REPETITION_PENALTY) * w["non_repetition"]
+               + fmt * w["formatting"])
     return {"instruction_words": iw, "response_words": rw, "repetition_rate": round(rep, 4),
             "formatting_score": round(fmt, 2), "quality_score": round(overall, 4)}
 
@@ -131,12 +189,29 @@ def detect_language(text):
 
 
 def detect_pii(text):
-    return {t: len(p.findall(text)) for t, p in PII_PATTERNS.items() if p.findall(text)}
+    """Count PII matches per type, applying per-type validators (e.g. Luhn)."""
+    found = {}
+    for pii_type, pattern in PII_PATTERNS.items():
+        validator = _VALIDATORS.get(pii_type)
+        matches = [m.group() for m in pattern.finditer(text)]
+        if validator:
+            matches = [m for m in matches if validator(m)]
+        if matches:
+            found[pii_type] = len(matches)
+    return found
 
 
 def remove_pii(text):
+    """Redact PII, most-specific pattern first, honouring per-type validators."""
     for pii_type, pattern in PII_PATTERNS.items():
-        text = pattern.sub(f"[{pii_type.upper()}_REDACTED]", text)
+        validator = _VALIDATORS.get(pii_type)
+        placeholder = f"[{pii_type.upper()}_REDACTED]"
+        if validator:
+            text = pattern.sub(
+                lambda m, _v=validator, _p=placeholder: _p if _v(m.group()) else m.group(),
+                text)
+        else:
+            text = pattern.sub(placeholder, text)
     return text
 
 
@@ -153,16 +228,40 @@ def filter_records(records, min_length=0, max_length=999999, lang=None):
 
 
 def split_dataset(records, val_ratio=0.1, test_ratio=0.1, stratify_key=None, seed=42):
-    """Split into train/val/test with optional stratification."""
+    """Split into train/val/test with optional stratification.
+
+    Groups too small to give up a row to every split go entirely to train. The
+    previous `max(1, ...)` floor took at least one row for test and one for val
+    from every group, so a group of 2 produced 0 training examples - a rare class
+    would vanish from training while still being evaluated on.
+    """
     random.seed(seed)
     if stratify_key and all(stratify_key in r for r in records):
         groups = {}
         for r in records:
             groups.setdefault(r[stratify_key], []).append(r)
         train, val, test = [], [], []
-        for grp in groups.values():
+        # A group needs enough rows to leave at least one behind for training.
+        min_splittable = 3 if (test_ratio > 0 and val_ratio > 0) else 2
+        for label, grp in groups.items():
             random.shuffle(grp)
-            nt, nv = max(1, int(len(grp)*test_ratio)), max(1, int(len(grp)*val_ratio))
+            if len(grp) < min_splittable:
+                logger.warning(f"Stratum '{label}' has {len(grp)} record(s); "
+                               f"assigning all to train to avoid an empty train split.")
+                train.extend(grp)
+                continue
+            nt = int(len(grp) * test_ratio)
+            nv = int(len(grp) * val_ratio)
+            if test_ratio > 0:
+                nt = max(1, nt)
+            if val_ratio > 0:
+                nv = max(1, nv)
+            # Never consume the whole group.
+            while nt + nv >= len(grp) and (nt + nv) > 0:
+                if nt >= nv and nt > 0:
+                    nt -= 1
+                elif nv > 0:
+                    nv -= 1
             test.extend(grp[:nt]); val.extend(grp[nt:nt+nv]); train.extend(grp[nt+nv:])
     else:
         s = list(records); random.shuffle(s)
@@ -202,16 +301,22 @@ def compute_stats(records):
 
 
 def clean_records(records, min_quality=0.3):
-    """Remove PII and drop low-quality records."""
+    """Remove PII and drop low-quality records.
+
+    Works on deep copies: mutating the caller's records in place meant that even
+    records dropped for low quality came back redacted, and any other view of the
+    same list silently changed underneath it.
+    """
     cleaned, pii_ct, low_q = [], 0, 0
-    for r in records:
+    for original in records:
+        r = copy.deepcopy(original)
         for fld in ("instruction", "response", "output", "text", "input"):
             if fld in r and isinstance(r[fld], str):
                 if detect_pii(r[fld]): pii_ct += 1
                 r[fld] = remove_pii(r[fld])
         if "messages" in r and isinstance(r["messages"], list):
             for msg in r["messages"]:
-                if "content" in msg:
+                if isinstance(msg, dict) and "content" in msg and isinstance(msg["content"], str):
                     if detect_pii(msg["content"]): pii_ct += 1
                     msg["content"] = remove_pii(msg["content"])
         if score_quality(r)["quality_score"] < min_quality:

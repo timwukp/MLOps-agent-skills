@@ -1,0 +1,32 @@
+[
+  {
+    "check": "train-package-upload",
+    "status": "PASS",
+    "detail": "s3://sagemaker-us-east-1-<ACCOUNT_ID>/mlops-skills-serving-val/model.tar.gz",
+    "seconds": 2.9
+  },
+  {
+    "check": "create-sagemaker-model",
+    "status": "PASS",
+    "detail": "mlops-skills-serving-val",
+    "seconds": 1.2
+  },
+  {
+    "check": "create-serverless-endpoint (model-serving pattern)",
+    "status": "PASS",
+    "detail": "endpoint InService",
+    "seconds": 172.0
+  },
+  {
+    "check": "invoke-endpoint (real inference)",
+    "status": "PASS",
+    "detail": "predictions=[0, 2]",
+    "seconds": 0.9
+  },
+  {
+    "check": "cleanup",
+    "status": "PASS",
+    "detail": "endpoint, config, model, s3 artifact deleted",
+    "seconds": 2.0
+  }
+]

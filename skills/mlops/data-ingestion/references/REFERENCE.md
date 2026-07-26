@@ -134,8 +134,14 @@ engine = create_engine(
 
 ### BigQuery
 ```python
-# Via pandas-gbq
-df = pd.read_gbq("SELECT * FROM dataset.table", project_id="my-project")
+# Via pandas-gbq (pd.read_gbq was removed in pandas 3.0)
+import pandas_gbq
+df = pandas_gbq.read_gbq("SELECT * FROM dataset.table", project_id="my-project")
+
+# Via the BigQuery client
+from google.cloud import bigquery
+client = bigquery.Client(project="my-project")
+df = client.query("SELECT * FROM dataset.table").to_dataframe()
 
 # Via SQLAlchemy (recommended for large queries)
 engine = create_engine("bigquery://my-project/my-dataset")
@@ -176,6 +182,8 @@ df = pq.read_table(
 ### DynamoDB
 ```python
 import boto3
+from boto3.dynamodb.conditions import Attr
+
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("features")
 response = table.scan(FilterExpression=Attr("updated_at").gt(watermark))

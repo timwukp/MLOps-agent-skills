@@ -53,7 +53,9 @@ and pipeline correctness. A comprehensive test suite catches bugs before they re
 ```python
 import pytest
 import pandas as pd
-import pandera as pa
+# pandera 0.20+ splits backends; import the pandas one explicitly.
+# Bare `import pandera as pa` still works but is deprecated.
+import pandera.pandas as pa
 
 class TestDataQuality:
     @pytest.fixture
@@ -154,7 +156,10 @@ class TestModelBehavior:
         perturbed = base.copy()
         perturbed[0, -1] = 1  # Change irrelevant feature
 
-        assert model.predict(base) == model.predict(perturbed)
+        # predict() returns an array. `assert a == b` on arrays raises
+        # "truth value of an array is ambiguous" for len > 1, so compare arrays
+        # explicitly.
+        np.testing.assert_array_equal(model.predict(base), model.predict(perturbed))
 
     def test_directional(self, model):
         """Higher income should increase credit approval probability."""
@@ -210,13 +215,30 @@ class TestModelQuality:
             f"Regression: new F1 {new_f1} < baseline {baseline_f1}"
 
     def test_latency(self, model_and_data):
-        """Prediction latency should be within SLA."""
+        """
+        Prediction latency should be within SLA.
+
+        Warm up first and assert on a percentile of many runs. A single cold
+        timing measures one-off import/JIT/allocator work and is flaky by
+        construction; time.perf_counter() is also the right clock here (time.time()
+        is wall-clock and can jump). This mirrors what scripts/test_model.py does.
+        """
         model, X, _ = model_and_data
         import time
-        start = time.time()
-        model.predict(X[:1])
-        latency_ms = (time.time() - start) * 1000
-        assert latency_ms < 100, f"Latency {latency_ms}ms exceeds 100ms SLA"
+        import numpy as np
+
+        sample = X[:1]
+        for _ in range(10):                     # warm up
+            model.predict(sample)
+
+        timings = []
+        for _ in range(100):
+            start = time.perf_counter()
+            model.predict(sample)
+            timings.append((time.perf_counter() - start) * 1000)
+
+        p95 = float(np.percentile(timings, 95))
+        assert p95 < 100, f"P95 latency {p95:.1f}ms exceeds 100ms SLA"
 ```
 
 ### 5. Pipeline Integration Tests

@@ -3,7 +3,7 @@
 
 Usage:
     python evaluate_llm.py --data eval.jsonl --metrics bleu rouge exact-match --output results.json
-    python evaluate_llm.py --data eval.jsonl --metrics ragas llm-judge --judge-model gpt-4o-mini --output results.json
+    python evaluate_llm.py --data eval.jsonl --metrics ragas llm-judge --judge-model gpt-5-mini --output results.json
 """
 import argparse
 import json
@@ -117,24 +117,27 @@ def compute_bertscore(samples, **_kw):
     return scores, {"bertscore_f1": agg}
 
 
-def compute_ragas(samples, **_kw):
+def compute_ragas(samples, judge_model="gpt-5-mini", **_kw):
     """RAGAS metrics: faithfulness, answer relevancy, context precision, context recall."""
     try:
-        from ragas import evaluate as ragas_evaluate
-        from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
-        from datasets import Dataset
+        from ragas import evaluate as ragas_evaluate, EvaluationDataset
+        from ragas.metrics import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
+        from ragas.llms import LangchainLLMWrapper
+        from langchain_openai import ChatOpenAI
     except ImportError:
-        logger.error("Install ragas: pip install ragas datasets")
+        logger.error("Install ragas: pip install ragas langchain-openai")
         return [{}] * len(samples), {"ragas_error": "ragas not installed"}
     rows = []
     for s in samples:
         ctx = s.get("context", "")
-        rows.append({"question": s["question"], "answer": s["answer"],
-                      "contexts": [ctx] if ctx else [""], "ground_truth": s.get("reference", "")})
+        rows.append({"user_input": s["question"], "response": s["answer"],
+                      "retrieved_contexts": [ctx] if ctx else [""], "reference": s.get("reference", "")})
     logger.info("Running RAGAS evaluation...")
     try:
-        result = ragas_evaluate(Dataset.from_list(rows),
-                                metrics=[faithfulness, answer_relevancy, context_precision, context_recall])
+        judge_llm = LangchainLLMWrapper(ChatOpenAI(model=judge_model))
+        result = ragas_evaluate(EvaluationDataset.from_list(rows),
+                                metrics=[Faithfulness(), AnswerRelevancy(), ContextPrecision(), ContextRecall()],
+                                llm=judge_llm)
     except Exception as e:
         logger.error(f"RAGAS evaluation failed: {e}")
         return [{}] * len(samples), {"ragas_error": str(e)}
@@ -146,7 +149,7 @@ def compute_ragas(samples, **_kw):
     return scores, agg
 
 
-def compute_llm_judge(samples, judge_model="gpt-4o-mini", **_kw):
+def compute_llm_judge(samples, judge_model="gpt-5-mini", **_kw):
     """LLM-as-judge: score response quality on a 1-5 scale via OpenAI or Anthropic."""
     client, provider = None, None
     try:
@@ -158,6 +161,10 @@ def compute_llm_judge(samples, judge_model="gpt-4o-mini", **_kw):
         try:
             from anthropic import Anthropic
             client, provider = Anthropic(), "anthropic"
+            if judge_model.startswith("gpt-"):
+                # Model name was an OpenAI default; map to a Claude judge on fallback
+                judge_model = "claude-haiku-4-5"
+                logger.info(f"Anthropic fallback: using judge model {judge_model}")
         except (ImportError, Exception):
             pass
     if client is None:
@@ -179,6 +186,7 @@ def compute_llm_judge(samples, judge_model="gpt-4o-mini", **_kw):
             if provider == "openai":
                 resp = client.chat.completions.create(
                     model=judge_model, temperature=0, max_tokens=200,
+                    response_format={"type": "json_object"},
                     messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}])
                 text = resp.choices[0].message.content.strip()
             else:
@@ -186,6 +194,11 @@ def compute_llm_judge(samples, judge_model="gpt-4o-mini", **_kw):
                     model=judge_model, system=sys_prompt, temperature=0, max_tokens=200,
                     messages=[{"role": "user", "content": user_msg}])
                 text = resp.content[0].text.strip()
+            # Strip markdown code fences if the judge wrapped its JSON
+            if text.startswith("```"):
+                text = text.strip("`")
+                text = text[4:] if text.startswith("json") else text
+                text = text.strip()
             parsed = json.loads(text)
             scores.append({"llm_judge_score": int(parsed["score"]), "llm_judge_reason": parsed.get("reason", "")})
         except Exception as e:
@@ -204,7 +217,7 @@ METRIC_FUNCTIONS = {
 }
 
 
-def run_evaluation(samples, metrics, judge_model="gpt-4o-mini"):
+def run_evaluation(samples, metrics, judge_model="gpt-5-mini"):
     """Run selected metrics and merge per-sample and aggregate results."""
     all_per_sample = [{} for _ in samples]
     all_aggregate = {}
@@ -238,7 +251,7 @@ def main():
     parser.add_argument("--data", required=True, help="Evaluation dataset (JSONL)")
     parser.add_argument("--metrics", nargs="+", required=True, choices=AVAILABLE_METRICS,
                         help="Metrics to compute")
-    parser.add_argument("--judge-model", default="gpt-4o-mini", help="Model for LLM-as-judge")
+    parser.add_argument("--judge-model", default="gpt-5-mini", help="Model for LLM-as-judge")
     parser.add_argument("--output", default="eval_results.json", help="Output JSON path")
     args = parser.parse_args()
 

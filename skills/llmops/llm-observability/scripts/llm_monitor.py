@@ -2,8 +2,8 @@
 """LLM observability and monitoring - log calls, track costs, detect anomalies.
 
 Usage:
-    python llm_monitor.py --action log --model gpt-4o --prompt "Hello" --response "Hi" --latency 320
-    python llm_monitor.py --action stats --period 1d --model-filter gpt-4o
+    python llm_monitor.py --action log --model gpt-5-mini --prompt "Hello" --response "Hi" --latency 320
+    python llm_monitor.py --action stats --period 1d --model-filter gpt-5-mini
     python llm_monitor.py --action alerts --period 1h
     python llm_monitor.py --action export --period 7d --output dashboard.json
     python llm_monitor.py --action cleanup --period 30d
@@ -11,6 +11,7 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import sqlite3
 import sys
 import uuid
@@ -20,34 +21,68 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Default cost per 1M tokens (input, output) in USD
+# Default cost per 1M tokens (input, output) in USD. Verified 2026-07 - re-check
+# provider pricing pages before relying on these numbers, and override via
+# estimate_cost(pricing=...) for models not listed here.
 DEFAULT_PRICING = {
-    "gpt-4o":            (2.50,  10.00),
-    "gpt-4o-mini":       (0.15,   0.60),
-    "gpt-4-turbo":      (10.00,  30.00),
-    "gpt-3.5-turbo":     (0.50,   1.50),
-    "claude-3-opus":    (15.00,  75.00),
-    "claude-3-sonnet":   (3.00,  15.00),
-    "claude-3-haiku":    (0.25,   1.25),
-    "claude-3.5-sonnet": (3.00,  15.00),
-    "llama-3-70b":       (0.00,   0.00),
-    "llama-3-8b":        (0.00,   0.00),
+    "gpt-5":             (1.25,  10.00),
+    "gpt-5-mini":        (0.25,   2.00),
+    "gpt-4.1":           (2.00,   8.00),
+    "gpt-4.1-mini":      (0.40,   1.60),
+    "claude-opus-5":     (5.00,  25.00),
+    "claude-sonnet-5":   (3.00,  15.00),
+    "claude-haiku-4-5":  (1.00,   5.00),
+    "claude-fable-5":   (10.00,  50.00),
+    "llama-4-scout":     (0.80,   2.40),
+    "self-hosted":       (0.00,   0.00),
 }
 PERIOD_MAP = {"1h": 1, "1d": 24, "7d": 168, "30d": 720}
+_WARNED_MODELS = set()
 
 
-def estimate_tokens(text):
-    """Estimate token count via tiktoken or word-based fallback."""
+def estimate_tokens(text, model="gpt-5-mini"):
+    """Estimate token count.
+
+    tiktoken only covers OpenAI tokenizers. For Claude models it is categorically
+    wrong (different vocabulary) - use the Anthropic count_tokens endpoint
+    (client.messages.count_tokens) when you need exact Claude counts. Everything
+    else falls back to a words * 1.3 heuristic.
+    """
     try:
         import tiktoken
-        return len(tiktoken.get_encoding("cl100k_base").encode(text))
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Unknown/non-OpenAI model: o200k_base is the current OpenAI default.
+            enc = tiktoken.get_encoding("o200k_base")
+        return len(enc.encode(text))
     except ImportError:
         return max(1, int(len(text.split()) * 1.3))
 
 
+def _percentile(values, q):
+    """Nearest-rank percentile of an unsorted sequence (q in [0, 1])."""
+    ordered = sorted(values)
+    idx = min(max(int(math.ceil(q * len(ordered))) - 1, 0), len(ordered) - 1)
+    return ordered[idx]
+
+
 def estimate_cost(model, input_tokens, output_tokens, pricing=None):
-    """Estimate USD cost for a single LLM call."""
-    in_r, out_r = (pricing or DEFAULT_PRICING).get(model, (0.0, 0.0))
+    """Estimate USD cost for a single LLM call.
+
+    Unknown models are priced at $0 but warned about once, so a silent zero in a
+    cost report is never mistaken for a free model.
+    """
+    table = pricing or DEFAULT_PRICING
+    if model not in table:
+        if model not in _WARNED_MODELS:
+            _WARNED_MODELS.add(model)
+            logger.warning(
+                f"No pricing entry for model '{model}'; cost recorded as $0. "
+                f"Add it to DEFAULT_PRICING or pass pricing=...")
+        in_r, out_r = 0.0, 0.0
+    else:
+        in_r, out_r = table[model]
     return (input_tokens * in_r + output_tokens * out_r) / 1_000_000
 
 
@@ -76,9 +111,9 @@ class LLMCallLogger:
                  output_tokens=None, latency_ms=0.0, status="success"):
         """Record a single LLM call."""
         if input_tokens is None:
-            input_tokens = estimate_tokens(prompt)
+            input_tokens = estimate_tokens(prompt, model)
         if output_tokens is None:
-            output_tokens = estimate_tokens(response)
+            output_tokens = estimate_tokens(response, model)
         total = input_tokens + output_tokens
         cost = estimate_cost(model, input_tokens, output_tokens)
         cid = uuid.uuid4().hex[:16]
@@ -120,16 +155,24 @@ class LLMCallLogger:
         """Detect latency spikes, error rate increases, cost anomalies."""
         cutoff = self._cutoff(period)
         alerts = []
+        # Keep chronological order so "recent" really means the newest calls, and
+        # build the p95 baseline from the *older* calls only. Comparing a sorted
+        # list's tail against its own p95 can never fire.
         rows = self.conn.execute(
-            "SELECT latency_ms FROM llm_calls WHERE timestamp>=? AND status='success'",
-            (cutoff,)).fetchall()
-        latencies = sorted(r["latency_ms"] for r in rows)
-        if len(latencies) >= 5:
-            p95 = latencies[int(len(latencies) * 0.95)]
-            if any(v > p95 * 1.5 for v in latencies[-5:]):
+            "SELECT latency_ms FROM llm_calls WHERE timestamp>=? AND status='success' "
+            "ORDER BY timestamp ASC", (cutoff,)).fetchall()
+        chronological = [r["latency_ms"] for r in rows]
+        recent_n = 5
+        if len(chronological) >= recent_n * 2:
+            baseline, recent = chronological[:-recent_n], chronological[-recent_n:]
+            p95 = _percentile(baseline, 0.95)
+            spikes = [v for v in recent if v > p95 * 1.5]
+            if spikes:
                 alerts.append({"type": "latency_spike",
-                               "message": f"Recent calls exceed 1.5x p95 ({p95:.0f}ms)",
-                               "p95_ms": round(p95, 1)})
+                               "message": f"{len(spikes)}/{len(recent)} most recent calls "
+                                          f"exceed 1.5x baseline p95 ({p95:.0f}ms)",
+                               "baseline_p95_ms": round(p95, 1),
+                               "max_recent_ms": round(max(recent), 1)})
         stats = self.get_stats(period)
         if stats["total_calls"] >= 10 and stats["error_rate_pct"] > 5:
             alerts.append({"type": "high_error_rate",
@@ -179,7 +222,7 @@ def main():
     p.add_argument("--period", default="1d", choices=PERIOD_MAP.keys(), help="Time period")
     p.add_argument("--model-filter", default=None, help="Filter by model name")
     p.add_argument("--output", default=None, help="Output file path (JSON)")
-    p.add_argument("--model", default="gpt-4o", help="Model name for logging")
+    p.add_argument("--model", default="gpt-5-mini", help="Model name for logging")
     p.add_argument("--prompt", default="", help="Prompt text")
     p.add_argument("--response", default="", help="Response text")
     p.add_argument("--input-tokens", type=int, default=None)

@@ -58,7 +58,7 @@ feature reuse across teams, and provides point-in-time correct data retrieval.
 #### Installation and Project Structure
 
 ```bash
-pip install feast[redis]
+pip install 'feast[redis]'
 
 # Initialize project
 feast init my_feature_store
@@ -86,18 +86,18 @@ online_store:
   connection_string: localhost:6379
 offline_store:
   type: file  # or bigquery, redshift, snowflake
-entity_key_serialization_version: 2
+entity_key_serialization_version: 3
 ```
 
 #### Define Entities and Feature Views
 
 ```python
 # entities.py
-from feast import Entity, ValueType
+from feast import Entity
 
 user = Entity(
-    name="user_id",
-    value_type=ValueType.INT64,
+    name="user",
+    join_keys=["user_id"],  # value_type=ValueType.* is deprecated
     description="Unique user identifier",
 )
 
@@ -167,17 +167,20 @@ def check_feature_freshness(store, feature_view_name, max_staleness_hours=24):
     from datetime import datetime, timezone
 
     fv = store.get_feature_view(feature_view_name)
-    # Use registry metadata for last materialization time
-    registry = store.registry
-    last_applied = registry.get_feature_view(feature_view_name, store.project).last_updated_timestamp
+    # materialization_intervals tracks actual materialization runs
+    # (last_updated_timestamp only reflects when the definition was applied)
+    if not fv.materialization_intervals:
+        return {"feature_view": feature_view_name, "is_fresh": False,
+                "detail": "never materialized"}
+    last_materialized = fv.materialization_intervals[-1][1]  # (start, end) tuples
 
     now = datetime.now(timezone.utc)
-    staleness = now - last_applied
+    staleness = now - last_materialized
     is_fresh = staleness.total_seconds() < max_staleness_hours * 3600
 
     return {
         "feature_view": feature_view_name,
-        "last_updated": last_applied.isoformat(),
+        "last_materialized": last_materialized.isoformat(),
         "staleness_hours": round(staleness.total_seconds() / 3600, 1),
         "is_fresh": is_fresh,
     }
@@ -223,10 +226,20 @@ For training event at t=7:
 ### 5. Streaming Feature Pipeline
 
 ```python
-from feast import FeatureStore
-from confluent_kafka import Consumer
+import json
+from datetime import datetime
 
-def streaming_feature_pipeline(store, topic, feature_view_name):
+import pandas as pd
+from confluent_kafka import Consumer
+from feast import FeatureStore, FeatureView, PushSource
+
+# The feature view must be backed by a PushSource (defined in the repo and
+# applied with `feast apply`) for store.push() to work:
+#
+#   user_push_source = PushSource(name="user_features_push", batch_source=user_source)
+#   user_features = FeatureView(..., source=user_push_source)
+
+def streaming_feature_pipeline(store: FeatureStore, topic, push_source_name):
     """Ingest streaming features into online store."""
     consumer = Consumer({
         "bootstrap.servers": "localhost:9092",
@@ -246,7 +259,7 @@ def streaming_feature_pipeline(store, topic, feature_view_name):
 
         # Push features to online store
         store.push(
-            push_source_name=feature_view_name + "_push",
+            push_source_name=push_source_name,
             df=pd.DataFrame([{**entity_key, **features, "event_timestamp": timestamp}]),
         )
 ```

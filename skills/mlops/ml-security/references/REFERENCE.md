@@ -53,8 +53,11 @@ bypassing content filters, evading malware detection.
 
 **Testing**:
 ```bash
-# Using scripts/security_scan.py
-python scripts/security_scan.py --scan robustness --model model.pt --framework pytorch --epsilon 0.03
+# Load smoke check + toolchain report (does NOT execute attacks)
+python scripts/security_scan.py --scan robustness --model model.pt --framework pytorch
+
+# A real robustness evaluation needs labelled eval data — see section 3 for the
+# ART FGSM/PGD/HopSkipJump patterns to run against your held-out test set.
 ```
 
 ---
@@ -166,7 +169,7 @@ infrastructure.
 
 **Mitigations**:
 - Pin exact dependency versions with hash verification
-- Use `pip-audit` and `safety check` for vulnerability scanning
+- Use `pip-audit` and `safety scan` (the `safety check` subcommand is deprecated) for vulnerability scanning
 - Verify model artifact hashes and signatures
 - Use safe serialization formats (SafeTensors, ONNX) instead of pickle
 - Scan models with `fickling` for pickle exploits
@@ -238,23 +241,38 @@ MITRE ATT&CK framework to cover AI/ML-specific adversarial techniques.
 
 ### Tactics and Techniques
 
+Technique IDs below follow the published ATLAS matrix. Several techniques are listed under more
+than one tactic in ATLAS (for example, `AML.T0018` appears under both Persistence and AI Attack
+Staging); the tactic shown here is the most common mapping. Always confirm the current ID, name,
+and tactic at https://atlas.mitre.org/techniques before publishing a threat model — ATLAS renames
+techniques between releases (e.g. "Backdoor ML Model" became "Manipulate AI Model").
+
 | Tactic | Technique ID | Technique Name | Description |
 |--------|-------------|----------------|-------------|
-| Reconnaissance | AML.T0000 | Active Scanning of ML API | Probe API to discover model type, input format, output structure |
-| Reconnaissance | AML.T0001 | Discover ML Model Family | Identify framework, architecture, version |
-| Reconnaissance | AML.T0002 | Discover Training Data | Identify datasets used for training |
-| Resource Development | AML.T0003 | Acquire Public ML Model | Download surrogate/shadow models |
-| Resource Development | AML.T0004 | Develop Adversarial ML Attacks | Build attack tooling |
-| Initial Access | AML.T0005 | ML Supply Chain Compromise | Compromise pretrained models, packages |
-| Initial Access | AML.T0006 | Data Poisoning | Inject malicious training data |
-| Execution | AML.T0007 | Adversarial Input (Evasion) | Craft inputs causing misclassification |
-| Execution | AML.T0008 | Backdoor Trigger | Activate embedded backdoor via trigger |
-| Persistence | AML.T0009 | Backdoor ML Model | Embed persistent backdoor in model weights |
-| Exfiltration | AML.T0010 | Model Extraction | Steal model via query-based extraction |
-| Exfiltration | AML.T0011 | Model Inversion | Reconstruct training data from model |
-| Exfiltration | AML.T0012 | Membership Inference | Determine training set membership |
-| Impact | AML.T0013 | Denial of ML Service | Overwhelm model API or degrade performance |
-| Impact | AML.T0014 | Evade ML Model | Bypass ML-based security controls |
+| Reconnaissance | AML.T0006 | Active Scanning | Probe a public-facing ML application to learn input format and model behavior |
+| Reconnaissance | AML.T0007 | Discover AI Artifacts | Locate model files, datasets, and notebooks in the victim environment |
+| Reconnaissance | AML.T0014 | Discover ML Model Family | Identify framework, architecture, or model family from outputs and docs |
+| Resource Development | AML.T0002 | Acquire Public ML Artifacts | Download public models/datasets to build or calibrate attacks |
+| Resource Development | AML.T0005 | Create Proxy ML Model | Train a surrogate/shadow model for offline attack crafting |
+| Resource Development | AML.T0017 | Develop Capabilities | Build adversarial ML tooling |
+| Initial Access | AML.T0010 | AI Supply Chain Compromise | Compromise pretrained models, datasets, or software dependencies |
+| Initial Access | AML.T0019 | Publish Poisoned Datasets | Place poisoned data where the victim will collect it |
+| Execution | AML.T0011 | User Execution | Victim loads an unsafe artifact (e.g. pickle payload) that runs attacker code |
+| Persistence | AML.T0020 | Poison Training Data | Modify training data to degrade accuracy or implant a trigger |
+| Persistence | AML.T0018 | Manipulate AI Model | Alter model weights directly to embed a persistent backdoor |
+| Defense Evasion | AML.T0015 | Evade ML Model | Bypass an ML-based security control (malware, spam, fraud detection) |
+| AI Attack Staging | AML.T0043 | Craft Adversarial Data | Generate evasion inputs (sub-techniques: white-box, black-box, transfer, manual) |
+| AI Attack Staging | AML.T0043.004 | Insert Backdoor Trigger | Stage the trigger pattern used to activate an implanted backdoor |
+| ML Model Access | AML.T0040 | AI Model Inference API Access | Use the production inference API as the attack surface |
+| Exfiltration | AML.T0024.000 | Infer Training Data Membership | Membership inference through the inference API |
+| Exfiltration | AML.T0024.001 | Invert AI Model | Reconstruct training-data features from inference API responses |
+| Exfiltration | AML.T0024.002 | Extract ML Model | Query-based model extraction (surrogate training) |
+| Exfiltration | AML.T0025 | Exfiltration via Cyber Means | Copy model artifacts out over conventional channels |
+| Impact | AML.T0029 | Denial of ML Service | Flood the model API to exhaust serving capacity |
+| Impact | AML.T0031 | Erode AI Model Integrity | Degrade model performance to reduce trust in the system |
+| Impact | AML.T0034 | Cost Harvesting | Drive up inference/compute spend through expensive queries |
+| Execution (LLM) | AML.T0051 | LLM Prompt Injection | Inject instructions via direct or indirect prompt content |
+| Defense Evasion (LLM) | AML.T0054 | LLM Jailbreak | Bypass model guardrails to elicit restricted behavior |
 
 ### Using ATLAS for Threat Modeling
 
@@ -280,8 +298,8 @@ MITRE ATT&CK framework to cover AI/ML-specific adversarial techniques.
 | **Evasion attacks** | Yes | Yes | Yes | Yes |
 | **Detection methods** | Yes | No | No | No |
 | **Preprocessing defenses** | Yes | No | No | No |
-| **Active maintenance** | Yes (IBM) | Yes | Limited | Limited |
-| **License** | MIT | MIT | MIT | MIT |
+| **Active maintenance** | Yes (Linux Foundation AI) | Yes | Limited | Archived (read-only since 2022) |
+| **License** | MIT | MIT | MIT | LGPL-3.0 |
 
 ### ART (Adversarial Robustness Toolbox)
 
@@ -400,13 +418,40 @@ adv_x = projected_gradient_descent(model, x, eps=0.03, eps_iter=0.01, nb_iter=40
 The noise multiplier (sigma) determines how much Gaussian noise is added to clipped gradients.
 Higher sigma = lower epsilon = more privacy = more utility loss.
 
-| Training Config | Noise Mult. | Approx. Epsilon | Notes |
-|----------------|-------------|-----------------|-------|
-| 10 epochs, batch 64, n=50K | 0.5 | ~30 | Minimal privacy |
-| 10 epochs, batch 64, n=50K | 1.0 | ~8 | Moderate privacy |
-| 10 epochs, batch 64, n=50K | 1.5 | ~3 | Good privacy |
-| 10 epochs, batch 64, n=50K | 2.0 | ~1.5 | Strong privacy |
-| 10 epochs, batch 64, n=50K | 3.0 | ~0.8 | Very strong |
+Epsilon is **not** a function of sigma alone — it depends on the sampling rate
+(batch_size / n) and the number of steps. The table below is for one specific
+config: n = 50,000, batch 64 (sample rate q = 0.00128), 10 epochs = 7,812 steps,
+delta = 1e-5. Values are computed with Opacus 1.6 accountants, not estimated.
+
+| Noise Mult. (sigma) | Epsilon (RDP accountant) | Epsilon (PRV accountant) | Notes |
+|--------------------|--------------------------|--------------------------|-------|
+| 0.5 | 7.02 | 5.78 | Weak |
+| 0.6 | 3.63 | 2.79 | Moderate |
+| 0.8 | 1.49 | 0.92 | Good |
+| 1.0 | 0.87 | 0.56 | Strong |
+| 1.1 | 0.69 | 0.47 | Strong (TF Privacy tutorial default) |
+| 1.5 | 0.36 | 0.30 | Very strong |
+| 2.0 | 0.23 | 0.21 | Very strong |
+| 3.0 | 0.15 | 0.13 | Very strong |
+
+Regenerate for **your** config rather than reading numbers off any table — the
+same sigma at a larger sample rate or more steps yields a much larger epsilon:
+
+```python
+from opacus.accountants import create_accountant
+
+n, batch_size, epochs, delta = 50_000, 64, 10, 1e-5
+q, steps = batch_size / n, int(epochs * n / batch_size)
+for sigma in (0.5, 0.8, 1.0, 1.5, 2.0, 3.0):
+    acc = create_accountant("rdp")       # or "prv" for the tighter bound
+    acc.history = [(sigma, q, steps)]
+    print(sigma, round(acc.get_epsilon(delta=delta), 2))
+
+# Inverse direction — solve for sigma given a target epsilon:
+from opacus.accountants.utils import get_noise_multiplier
+print(get_noise_multiplier(target_epsilon=3.0, target_delta=delta,
+                           sample_rate=q, epochs=epochs, accountant="rdp"))
+```
 
 ### Max Gradient Norm Selection
 
@@ -473,7 +518,7 @@ Is the data highly sensitive (medical, financial, legal)?
 - [ ] **Data anonymization applied** where PII is detected
 - [ ] **Dataset checksums computed** and stored in manifest
 - [ ] **Dependencies pinned** with exact versions and hashes
-- [ ] **Dependency vulnerability scan** passed (`pip-audit`, `safety check`)
+- [ ] **Dependency vulnerability scan** passed (`pip-audit`, `safety scan`)
 - [ ] **Secrets scanning** passed (no hardcoded credentials in code/config)
 - [ ] **Access control** configured for data storage (least privilege)
 
@@ -531,7 +576,7 @@ Is the data highly sensitive (medical, financial, legal)?
 | **Purpose limitation** (Art. 5) | Data collected for one purpose cannot be used for another | Track data lineage; enforce purpose-bound access |
 | **Data minimization** (Art. 5) | Only use data necessary for the purpose | Feature selection review; remove unnecessary PII |
 | **Right to erasure** (Art. 17) | Individuals can request data deletion | Implement machine unlearning or retrain without data |
-| **Right to explanation** (Art. 22) | Automated decisions must be explainable | Use interpretable models or generate explanations (SHAP, LIME) |
+| **Automated decision-making** (Art. 22 + Art. 13-15) | No standalone "right to explanation" in the text: Art. 22 gives a right not to be subject to solely automated decisions with legal/significant effect (with exceptions), and Arts. 13-15 require "meaningful information about the logic involved". Recital 71 mentions an explanation but recitals are non-binding. | Provide meaningful logic disclosure plus human review / contest paths; SHAP or LIME explanations help evidence this but are not themselves the legal requirement |
 | **Data Protection Impact Assessment** (Art. 35) | Required for high-risk processing | Conduct DPIA before training on personal data |
 | **Privacy by design** (Art. 25) | Build privacy into the system from the start | Differential privacy, anonymization, encryption |
 | **Data breach notification** (Art. 33-34) | Report breaches within 72 hours | Monitoring, incident response plan, audit logging |
@@ -602,9 +647,9 @@ Is the data highly sensitive (medical, financial, legal)?
 | Audit logging | Required | Required | Required |
 | Data encryption (at rest + transit) | Required | Required | Required |
 | Access controls / RBAC | Required | Required | Required |
-| Breach notification | 72 hours | 72 hours (AG) | 60 days |
-| Impact assessment | DPIA required | Not required | Risk analysis |
-| Model explainability | Required (Art. 22) | Right to opt out | Not explicit |
+| Breach notification | 72 hours to supervisory authority (Art. 33) | "Most expedient time possible and without unreasonable delay"; written notice to the CA AG when >500 CA residents are affected (Cal. Civ. Code 1798.29/1798.82) — no fixed 72-hour clock | 60 days to individuals and HHS; >=500 residents of a state also triggers media notice |
+| Impact assessment | DPIA required | Risk assessment required for high-risk processing under CPRA regulations | Risk analysis |
+| Model explainability | Meaningful information about the logic + human review for solely automated decisions (Arts. 13-15, 22) | Right to opt out of automated decision-making; access to logic under CPRA ADMT rules | Not explicit |
 | Data processing records | Required | Required | Required |
 | Consent management | Often required | Opt-out model | Authorization |
 
@@ -994,8 +1039,8 @@ cosign verify-blob --key cosign.pub --signature model.sig model.onnx
 # Scan Python dependencies for known vulnerabilities
 pip-audit --requirement requirements.txt --output json > audit_results.json
 
-# Scan with Safety
-safety check --json --output audit_safety.json
+# Scan with Safety (3.x: `scan`; `check` is deprecated and removed in newer releases)
+safety scan --output json > audit_safety.json
 
 # Scan container images
 trivy image my-ml-service:latest --format json > trivy_results.json
@@ -1332,6 +1377,10 @@ class TokenAuthenticator:
 ### DataFrame Anonymization
 
 ```python
+# mask_pii comes from SKILL.md section 14, or use the maintained implementation:
+#   from privacy_guard import PIIMasker
+#   mask_pii = lambda t: PIIMasker().mask_text(t)
+
 def anonymize_dataframe(df, columns=None, method="mask"):
     """Anonymize PII in a pandas DataFrame."""
     import pandas as pd
@@ -1355,9 +1404,13 @@ def anonymize_dataframe(df, columns=None, method="mask"):
 import torch
 import numpy as np
 
-def smoothed_predict(model, x, sigma, n_samples=1000, batch_size=100):
-    """Predict with randomized smoothing for certifiable robustness."""
-    counts = torch.zeros(model.num_classes)
+def smoothed_predict(model, x, sigma, num_classes, n_samples=1000, batch_size=100):
+    """
+    Predict with randomized smoothing for certifiable robustness.
+
+    num_classes must be passed in: nn.Module has no num_classes attribute.
+    """
+    counts = torch.zeros(num_classes)
     for i in range(0, n_samples, batch_size):
         bs = min(batch_size, n_samples - i)
         noise = torch.randn(bs, *x.shape) * sigma
@@ -1371,27 +1424,37 @@ def smoothed_predict(model, x, sigma, n_samples=1000, batch_size=100):
 
 ### Scikit-learn Adversarial Testing with ART
 
+Pick the attack by whether the estimator exposes gradients:
+
+- **Differentiable sklearn models** (`LogisticRegression`, `LinearSVC`, `SVC`,
+  `MLPClassifier`): gradient attacks such as FGSM and PGD work.
+- **Tree ensembles** (`RandomForest`, `GradientBoosting`, XGBoost, LightGBM):
+  `SklearnClassifier.loss_gradient` raises `NotImplementedError`, so FGSM/PGD
+  cannot run. Use a decision-based black-box attack (HopSkipJump, ZOO,
+  Boundary) or ART's `DecisionTreeAttack` for single trees.
+
 ```python
-from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent
+from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent, HopSkipJump
 from art.estimators.classification import SklearnClassifier
 from sklearn.metrics import accuracy_score
 
-# Wrap model
 classifier = SklearnClassifier(model=sklearn_model, clip_values=(0, 1))
 
-# FGSM attack
-fgsm = FastGradientMethod(estimator=classifier, eps=0.1)
-adversarial_samples = fgsm.generate(X_test)
+is_gradient_capable = hasattr(sklearn_model, "coef_") or hasattr(sklearn_model, "coefs_")
 
-# Evaluate robustness
+if is_gradient_capable:
+    # Linear / MLP models: gradient attacks
+    adversarial_samples = FastGradientMethod(estimator=classifier, eps=0.1).generate(X_test)
+    stronger = ProjectedGradientDescent(estimator=classifier, eps=0.1, max_iter=40)
+    pgd_samples = stronger.generate(X_test)
+else:
+    # Tree ensembles: decision-based black-box attack (no gradients needed)
+    adversarial_samples = HopSkipJump(classifier=classifier, max_iter=20).generate(X_test)
+
 clean_accuracy = accuracy_score(y_test, classifier.predict(X_test).argmax(1))
 adv_accuracy = accuracy_score(y_test, classifier.predict(adversarial_samples).argmax(1))
 print(f"Clean: {clean_accuracy:.2%}, Adversarial: {adv_accuracy:.2%}")
 print(f"Robustness drop: {clean_accuracy - adv_accuracy:.2%}")
-
-# PGD attack (stronger)
-pgd = ProjectedGradientDescent(estimator=classifier, eps=0.1, max_iter=40)
-pgd_samples = pgd.generate(X_test)
 ```
 
 ### C&W Attack with ART

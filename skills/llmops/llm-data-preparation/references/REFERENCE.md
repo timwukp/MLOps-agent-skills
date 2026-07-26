@@ -76,15 +76,22 @@ def evol_instruct(instruction: str, num_evolutions: int = 3) -> list:
 # The key insight: feed the LLM a chat template prefix and let it complete
 # with a "user" message, extracting natural instructions
 
+# The prefix is model-family-specific: this is the Llama 3 chat template. Qwen,
+# Mistral and Gemma all use different control tokens, so read the tokenizer's
+# chat_template (or call tokenizer.apply_chat_template) instead of hardcoding.
 template_prefix = "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
 
-# The LLM will naturally complete this with a plausible user instruction
-response = llm.generate(
-    prompt=template_prefix,
-    temperature=1.0,
-    stop_token="<|eot_id|>"
+# The LLM will naturally complete this with a plausible user instruction.
+# There is no `stop_token` parameter in the common serving APIs - pass the stop
+# string through the sampling params (vLLM: SamplingParams(stop=[...]);
+# OpenAI-compatible: stop=["<|eot_id|>"]).
+from vllm import SamplingParams
+
+outputs = llm.generate(
+    [template_prefix],
+    SamplingParams(temperature=1.0, stop=["<|eot_id|>"], max_tokens=256),
 )
-extracted_instruction = response.text
+extracted_instruction = outputs[0].outputs[0].text.strip()
 # Then generate a response to this instruction using the same or stronger model
 ```
 
@@ -116,11 +123,16 @@ Round 4: Quality filter the entire conversation
 
 ### Argilla for RLHF Data Collection
 
+Argilla 2.0 removed the 1.x API (`rg.init`, `rg.FeedbackDataset`,
+`rg.FeedbackRecord`, `rg.SuggestionSchema`, `push_to_argilla`). The current shape:
+
 ```python
-import argilla as rg
+import argilla as rg   # requires argilla >= 2.0
+
+client = rg.Argilla(api_url="http://localhost:6900", api_key="argilla.apikey")
 
 # Create a preference dataset for RLHF
-dataset = rg.FeedbackDataset(
+settings = rg.Settings(
     fields=[
         rg.TextField(name="instruction"),
         rg.TextField(name="response_a"),
@@ -129,24 +141,26 @@ dataset = rg.FeedbackDataset(
     questions=[
         rg.RatingQuestion(name="preference", values=[1, 2, 3, 4, 5],
                           description="Rate response A vs B (1=A much better, 5=B much better)"),
-        rg.TextQuestion(name="rationale", description="Explain your preference"),
-    ]
+        rg.TextQuestion(name="rationale", required=False,
+                        description="Explain your preference"),
+    ],
 )
 
-# Add records with model-generated suggestions
-for item in data:
-    dataset.add_records([
-        rg.FeedbackRecord(
-            fields={
-                "instruction": item["instruction"],
-                "response_a": item["response_a"],
-                "response_b": item["response_b"],
-            },
-            suggestions=[
-                rg.SuggestionSchema(question_name="preference", value=3)
-            ]
-        )
-    ])
+dataset = rg.Dataset(name="rlhf-preferences", settings=settings, client=client)
+dataset.create()
+
+# Log records in bulk, with model-generated suggestions
+dataset.records.log([
+    rg.Record(
+        fields={
+            "instruction": item["instruction"],
+            "response_a": item["response_a"],
+            "response_b": item["response_b"],
+        },
+        suggestions=[rg.Suggestion("preference", 3, agent="reward-model-v1")],
+    )
+    for item in data
+])
 ```
 
 ## Dataset Quality Metrics and Filtering
@@ -220,9 +234,14 @@ def create_minhash(text: str, num_perm: int = 128) -> MinHash:
     m = MinHash(num_perm=num_perm)
     # Use word-level n-grams
     words = text.lower().split()
-    for i in range(len(words) - 2):
-        ngram = " ".join(words[i:i+3])
-        m.update(ngram.encode("utf-8"))
+    shingles = {" ".join(words[i:i+3]) for i in range(len(words) - 2)}
+    # Texts shorter than 3 words produce NO trigrams, leaving an empty signature
+    # that matches every other empty signature - so all short texts collapse into
+    # one "duplicate". Fall back to the whole normalised string.
+    if not shingles:
+        shingles = {" ".join(words)} if words else {text.strip().lower()}
+    for shingle in shingles:
+        m.update(shingle.encode("utf-8"))
     return m
 
 def deduplicate_dataset(dataset: list, threshold: float = 0.8) -> list:
@@ -250,12 +269,31 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 
 def semantic_dedup(dataset: list, similarity_threshold: float = 0.95) -> list:
-    """Remove semantically duplicate entries using embeddings."""
-    texts = [item["instruction"] for item in dataset]
-    embeddings = embed_batch(texts)  # shape: (N, dim)
+    """Remove semantically duplicate entries using embeddings.
 
-    # Compute pairwise cosine similarity via DBSCAN
-    distance_matrix = 1 - np.dot(embeddings, embeddings.T)
+    Three things to know before running this at scale:
+
+    1. `1 - X @ X.T` is only a cosine distance if the rows are L2-normalised.
+       Un-normalised embeddings give distances outside [0, 2] and eps stops
+       meaning what you think it means - so normalise explicitly.
+    2. `min_samples=1` makes DBSCAN transitive: A~B and B~C put A and C in the
+       same cluster even when A and C are not similar. Long chains of loosely
+       related texts collapse to one survivor. Use it deliberately, or switch to
+       agglomerative clustering with a distance_threshold for non-chaining
+       behaviour.
+    3. The dense distance matrix is O(N^2) in memory - 100K rows of float64 is
+       ~80 GB. Above roughly 20-30K rows, use an ANN index (FAISS, Qdrant) and
+       threshold nearest-neighbour pairs instead of materialising the matrix.
+    """
+    texts = [item["instruction"] for item in dataset]
+    embeddings = np.asarray(embed_batch(texts), dtype=np.float32)  # (N, dim)
+
+    # Required for `1 - dot` to be cosine distance
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / np.clip(norms, 1e-12, None)
+
+    # Compute pairwise cosine distance (dense: O(N^2) memory - see note 3)
+    distance_matrix = np.clip(1 - embeddings @ embeddings.T, 0, 2)
     clustering = DBSCAN(eps=1 - similarity_threshold, min_samples=1, metric="precomputed")
     labels = clustering.fit_predict(distance_matrix)
 
@@ -268,6 +306,42 @@ def semantic_dedup(dataset: list, similarity_threshold: float = 0.95) -> list:
             deduplicated.append(dataset[i])
 
     return deduplicated
+```
+
+### Benchmark Decontamination
+
+Deduplication removes repeats *inside* your training set. Decontamination removes
+training rows that overlap your **evaluation** sets - without it, reported eval
+scores measure memorisation. Run it against every benchmark you report on, before
+training.
+
+```python
+def decontaminate(train: list, eval_texts: list, n: int = 13) -> list:
+    """Drop training rows sharing an n-gram with any eval example.
+
+    n=13 word-level n-grams is the convention used in the GPT-3/Llama reports.
+    For paraphrased contamination, complement this with MinHash LSH at
+    threshold ~0.8 or embedding similarity - exact n-grams miss rewordings.
+    """
+    def ngrams(text, n):
+        words = text.lower().split()
+        if len(words) < n:
+            return {" ".join(words)} if words else set()
+        return {" ".join(words[i:i+n]) for i in range(len(words) - n + 1)}
+
+    eval_ngrams = set()
+    for text in eval_texts:
+        eval_ngrams |= ngrams(text, n)
+
+    clean, removed = [], 0
+    for row in train:
+        text = row.get("instruction", "") + " " + row.get("output", "")
+        if ngrams(text, n) & eval_ngrams:
+            removed += 1
+            continue
+        clean.append(row)
+    print(f"Decontamination removed {removed}/{len(train)} contaminated rows")
+    return clean
 ```
 
 ## Data Mixing Strategies for Fine-Tuning
@@ -462,8 +536,13 @@ Always check the most current terms of service, as they are subject to change.
 
 ## Common Pitfalls
 
-- Using synthetic data from a model to train the same model (model collapse).
-- Not deduplicating between training and evaluation sets (data contamination).
+- Training on *unfiltered* self-generated output across successive generations
+  (model collapse). Note the distinction: self-distillation with a real filter -
+  rejection sampling, a verifier, an LLM judge, or human review - is standard,
+  productive practice (STaR, RFT, Constitutional AI, and most current
+  post-training pipelines). Collapse comes from recycling raw generations with no
+  selection pressure and no fresh human data, not from synthetic data as such.
+- Not decontaminating between training and evaluation sets (data contamination).
 - Over-representing one topic or style in the training mix.
 - Ignoring license restrictions on source datasets or model-generated outputs.
 - Not filtering for quality, leading to noisy training signal.

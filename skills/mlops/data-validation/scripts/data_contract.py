@@ -114,7 +114,10 @@ def save_contract(contract: DataContract, path: str) -> None:
 def _read_csv(path: str) -> List[Dict[str, str]]:
     with open(path, newline="") as fh:
         reader = csv.DictReader(fh)
-        return list(reader)
+        # DictReader fills short rows with None; normalize to "" so string
+        # operations (strip, comparisons) never hit a None value.
+        return [{k: (v if v is not None else "") for k, v in row.items()}
+                for row in reader]
 
 
 def validate(contract: DataContract, data_path: str) -> List[Dict[str, Any]]:
@@ -163,10 +166,18 @@ def validate(contract: DataContract, data_path: str) -> List[Dict[str, Any]]:
         cons = col_spec.constraints
         # Min / max (numeric)
         if "min" in cons or "max" in cons:
-            try:
-                nums = [float(v) for v in values if v.strip() != ""]
-            except ValueError:
-                nums = []
+            nums = []
+            unparseable = 0
+            for v in values:
+                if v.strip() == "":
+                    continue
+                try:
+                    nums.append(float(v))
+                except ValueError:
+                    unparseable += 1
+            if unparseable:
+                results.append({"rule": f"numeric:{cname}", "passed": False,
+                                "detail": f"unparseable_values={unparseable}"})
             if nums:
                 if "min" in cons:
                     ok = all(n >= cons["min"] for n in nums)

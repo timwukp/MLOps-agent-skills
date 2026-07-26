@@ -128,3 +128,26 @@ All 25 skills validated against the [Agent Skills specification](https://agentsk
 | **PASS** | Script executes correctly, all code paths verified |
 | **PARTIAL** | Code is correct but requires external resources (API keys, GPU, platform) to fully execute |
 | **EXPECTED FAIL** | Script is a platform-specific definition file (Airflow DAG, Prefect flow) that requires the platform to import |
+
+---
+
+## Update 2026-07-26: Accuracy overhaul + live AWS validation
+
+All 25 skills were deep-reviewed for technical accuracy (5 parallel review passes) and
+~200 confirmed issues were fixed — full details in the PR description. Highlights:
+
+- **Security-grade fixes**: fabricated MITRE ATLAS IDs replaced with real ones; pip-audit/safety
+  parsers no longer drop real vulnerabilities; `.h5` no longer classified as a safe format;
+  fail-open DP "rdp" accounting removed; injection-regex case bug; eval() sandbox replaced with
+  AST-whitelist evaluator.
+- **Library API refresh** (verified against July 2026 releases): MLflow 3.x aliases, Evidently 0.7+,
+  Great Expectations 1.x, Airflow 3.x / Prefect 3.x, TRL 1.x SFTConfig, RAGAS 0.2+, Langfuse v3,
+  Argilla 2.x, LangChain/LangGraph 1.x, torch.amp, BentoML 1.2+, SageMaker SDK v3 ModelTrainer.
+- **Model/pricing refresh**: retired Claude 3.x / GPT-4o-era IDs replaced with current models and
+  verified pricing (claude-opus-5 $5/$25, claude-sonnet-5 $3/$15, claude-haiku-4-5 $1/$5).
+- **Live AWS validation**: model-training, model-registry, and model-serving patterns executed
+  end-to-end on a real SageMaker account (registry lifecycle 7/7 PASS; serverless endpoint deploy +
+  invoke 5/5 PASS). See `tests/aws_validation/VALIDATION_SUMMARY.md`. One real-world packaging
+  gotcha discovered during validation is now documented in the model-serving reference.
+
+Post-fix test status: schema validation 25/25, script tests 48 pass / 2 skipped, py_compile clean.

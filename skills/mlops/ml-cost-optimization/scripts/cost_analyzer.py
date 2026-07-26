@@ -35,15 +35,30 @@ from typing import Dict, List, Optional, Tuple
 # GPU catalog
 # ---------------------------------------------------------------------------
 
+# Price basis: AWS us-east-1 Linux on-demand, per GPU (multi-GPU instance price
+# divided by GPU count), rounded to the cent. These are point-in-time list prices
+# and MUST be re-checked against the AWS pricing page before being used for a
+# real budget. `spot_price` is a rough recent average only — spot is a live market
+# that moves by AZ, instance type, and hour, and H100/A100 spot capacity is often
+# simply unavailable in the big three clouds.
+#
+# fp16_tflops is the DENSE Tensor-Core FP16 figure. Vendor marketing usually
+# quotes the 2x sparse number (H100 SXM: 989 sparse / 494 dense); sparse throughput
+# requires a 2:4-sparsified model and is not what a normal training run gets.
+#
+# throughput_factor is a coarse end-to-end training-throughput multiplier relative
+# to a T4 (=1.0). It is deliberately NOT the raw TFLOPS ratio, because real jobs
+# are also bounded by memory bandwidth, interconnect, and kernel maturity.
 GPU_CATALOG = {
     "t4": {
         "name": "NVIDIA T4",
         "vram_gb": 16,
         "fp32_tflops": 8.1,
-        "fp16_tflops": 65.0,
+        "fp16_tflops": 65.0,          # dense
         "tensor_cores": True,
-        "on_demand_price": 0.35,
-        "spot_price": 0.12,
+        "instance": "g4dn.xlarge (1x T4)",
+        "on_demand_price": 0.526,
+        "spot_price": 0.16,
         "throughput_factor": 1.0,
         "best_for": "inference, small training, budget-friendly",
     },
@@ -51,10 +66,11 @@ GPU_CATALOG = {
         "name": "NVIDIA V100 16GB",
         "vram_gb": 16,
         "fp32_tflops": 15.7,
-        "fp16_tflops": 125.0,
+        "fp16_tflops": 125.0,         # dense
         "tensor_cores": True,
-        "on_demand_price": 1.50,
-        "spot_price": 0.45,
+        "instance": "p3.2xlarge (1x V100 16GB)",
+        "on_demand_price": 3.06,
+        "spot_price": 0.92,
         "throughput_factor": 2.5,
         "best_for": "general training, medium models",
     },
@@ -62,32 +78,60 @@ GPU_CATALOG = {
         "name": "NVIDIA V100 32GB",
         "vram_gb": 32,
         "fp32_tflops": 15.7,
-        "fp16_tflops": 125.0,
+        "fp16_tflops": 125.0,         # dense
         "tensor_cores": True,
-        "on_demand_price": 2.48,
-        "spot_price": 0.74,
-        "throughput_factor": 2.5,
+        # 32 GB V100s only exist on p3dn.24xlarge (8 GPUs, $31.21/hr).
+        "instance": "p3dn.24xlarge (8x V100 32GB), per-GPU",
+        "on_demand_price": 3.90,
+        "spot_price": 1.17,
+        "throughput_factor": 2.6,
         "best_for": "general training, large batch sizes",
     },
     "a10g": {
         "name": "NVIDIA A10G",
         "vram_gb": 24,
         "fp32_tflops": 31.2,
-        "fp16_tflops": 62.5,
+        "fp16_tflops": 62.5,          # dense (125 with sparsity)
         "tensor_cores": True,
-        "on_demand_price": 1.00,
+        "instance": "g5.xlarge (1x A10G)",
+        "on_demand_price": 1.006,
         "spot_price": 0.35,
         "throughput_factor": 3.0,
         "best_for": "inference, fine-tuning, medium models",
+    },
+    "l4": {
+        "name": "NVIDIA L4",
+        "vram_gb": 24,
+        "fp32_tflops": 30.3,
+        "fp16_tflops": 121.0,         # dense (242 with sparsity)
+        "tensor_cores": True,
+        "instance": "g6.xlarge (1x L4)",
+        "on_demand_price": 0.805,
+        "spot_price": 0.28,
+        "throughput_factor": 2.8,
+        "best_for": "cost-effective inference, fine-tuning",
+    },
+    "l40s": {
+        "name": "NVIDIA L40S 48GB",
+        "vram_gb": 48,
+        "fp32_tflops": 91.6,
+        "fp16_tflops": 366.0,         # dense (733 with sparsity)
+        "tensor_cores": True,
+        "instance": "g6e.xlarge (1x L40S)",
+        "on_demand_price": 1.861,
+        "spot_price": 0.70,
+        "throughput_factor": 5.0,
+        "best_for": "mid-size training and high-throughput inference; no NVLink",
     },
     "a100_40gb": {
         "name": "NVIDIA A100 40GB",
         "vram_gb": 40,
         "fp32_tflops": 19.5,
-        "fp16_tflops": 312.0,
+        "fp16_tflops": 312.0,         # dense (624 with sparsity)
         "tensor_cores": True,
-        "on_demand_price": 3.50,
-        "spot_price": 1.10,
+        "instance": "p4d.24xlarge (8x A100 40GB, $32.77/hr), per-GPU",
+        "on_demand_price": 4.10,
+        "spot_price": 1.30,
         "throughput_factor": 8.0,
         "best_for": "large model training, high throughput",
     },
@@ -95,34 +139,39 @@ GPU_CATALOG = {
         "name": "NVIDIA A100 80GB",
         "vram_gb": 80,
         "fp32_tflops": 19.5,
-        "fp16_tflops": 312.0,
+        "fp16_tflops": 312.0,         # dense (624 with sparsity)
         "tensor_cores": True,
-        "on_demand_price": 4.00,
-        "spot_price": 1.50,
+        "instance": "p4de.24xlarge (8x A100 80GB, $40.97/hr), per-GPU",
+        "on_demand_price": 5.12,
+        "spot_price": 1.80,
         "throughput_factor": 9.0,
         "best_for": "very large models, multi-task training",
     },
     "h100": {
-        "name": "NVIDIA H100",
+        "name": "NVIDIA H100 80GB SXM",
         "vram_gb": 80,
-        "fp32_tflops": 51.0,
-        "fp16_tflops": 990.0,
+        "fp32_tflops": 67.0,
+        "fp16_tflops": 494.5,         # DENSE (989 is the sparse marketing figure)
         "tensor_cores": True,
-        "on_demand_price": 6.00,
-        "spot_price": 2.50,
-        "throughput_factor": 15.0,
+        "instance": "p5.48xlarge (8x H100, $98.32/hr), per-GPU",
+        "on_demand_price": 12.29,
+        # Big-3 H100 spot is scarce and rarely below ~$6/GPU-hr; sub-$3 figures
+        # come from neoclouds (Lambda, CoreWeave, RunPod), not AWS/GCP/Azure.
+        "spot_price": 6.00,
+        "throughput_factor": 12.0,
         "best_for": "LLM training, maximum throughput",
     },
-    "l4": {
-        "name": "NVIDIA L4",
-        "vram_gb": 24,
-        "fp32_tflops": 30.3,
-        "fp16_tflops": 121.0,
+    "h200": {
+        "name": "NVIDIA H200 141GB SXM",
+        "vram_gb": 141,
+        "fp32_tflops": 67.0,
+        "fp16_tflops": 494.5,         # same compute as H100; 1.4x memory bandwidth
         "tensor_cores": True,
-        "on_demand_price": 0.50,
-        "spot_price": 0.18,
-        "throughput_factor": 2.8,
-        "best_for": "cost-effective inference, fine-tuning",
+        "instance": "p5e/p5en.48xlarge (8x H200), per-GPU",
+        "on_demand_price": 11.00,
+        "spot_price": 6.00,
+        "throughput_factor": 14.0,
+        "best_for": "memory-bound LLM training and long-context inference",
     },
 }
 
@@ -233,7 +282,9 @@ def estimate_training_cost(
     compute_cost = total_gpu_hours * price
 
     # HPO additional cost (trials are typically shorter -- ~30% of full training)
+    hpo_multiplier = 1.0
     if num_hpo_trials > 0:
+        hpo_multiplier += 0.3 * num_hpo_trials
         hpo_hours = hours * 0.3 * num_hpo_trials * num_gpus
         compute_cost += hpo_hours * price
         total_gpu_hours += hpo_hours
@@ -253,10 +304,13 @@ def estimate_training_cost(
     spot_compute = total_gpu_hours * gpu["spot_price"]
     spot_savings = on_demand_compute - spot_compute
 
+    # Compare like with like: the no-mixed-precision baseline must include the
+    # same HPO trials, otherwise mp_savings goes negative as soon as
+    # --hpo-trials is set (HPO hours were added to total_gpu_hours only).
     hours_without_mp = estimate_gpu_hours(
         model_params_millions, dataset_size_gb, num_epochs, gpu_type, mixed_precision=False
-    ) * num_gpus
-    mp_savings = (hours_without_mp - total_gpu_hours) * price
+    ) * num_gpus * hpo_multiplier
+    mp_savings = (hours_without_mp - total_gpu_hours) * price if mixed_precision else 0.0
 
     return TrainingCostEstimate(
         gpu_type=gpu_type,
@@ -482,23 +536,33 @@ def identify_optimizations(records: List[ExperimentRecord]) -> List[Dict]:
     for gpu_type, gpu_records in cost_by_gpu.items():
         if gpu_type in GPU_CATALOG:
             gpu_info = GPU_CATALOG[gpu_type]
-            # If average dataset is small but using expensive GPU
+            # Heuristic flag only. Dataset size is a WEAK proxy for GPU need: what
+            # actually determines the required VRAM is model size (weights +
+            # gradients + optimizer state + activations), and what determines
+            # whether a big GPU pays off is achieved utilization. A 1 GB dataset
+            # can still require an 80 GB GPU for a 13B model, and a 500 GB dataset
+            # can train fine on a T4. Treat this as "go measure", not "downsize".
             avg_data = statistics.mean(r.dataset_size_gb for r in gpu_records)
-            avg_params = 0  # We don't have params in history, so check by data size
             if avg_data < 5 and gpu_info["on_demand_price"] > 3.0:
                 recommendations.append({
                     "type": "gpu_right_sizing",
-                    "priority": "HIGH",
+                    "priority": "MEDIUM",
                     "message": (
                         f"Using {gpu_info['name']} (${gpu_info['on_demand_price']}/hr) for "
-                        f"small datasets (avg {avg_data:.1f} GB). Consider a smaller GPU."
+                        f"small datasets (avg {avg_data:.1f} GB). Possible over-provisioning."
                     ),
                     "suggestion": (
-                        f"Try {GPU_CATALOG['a10g']['name']} (${GPU_CATALOG['a10g']['on_demand_price']}/hr) "
-                        f"or {GPU_CATALOG['t4']['name']} (${GPU_CATALOG['t4']['on_demand_price']}/hr) "
-                        f"for small workloads."
+                        "Verify before downsizing: check peak VRAM "
+                        "(torch.cuda.max_memory_allocated) and sustained GPU utilization "
+                        "(nvidia-smi / DCGM). If peak VRAM fits and utilization is "
+                        f"under ~50%, try {GPU_CATALOG['a10g']['name']} "
+                        f"(${GPU_CATALOG['a10g']['on_demand_price']}/hr) or "
+                        f"{GPU_CATALOG['t4']['name']} "
+                        f"(${GPU_CATALOG['t4']['on_demand_price']}/hr). Dataset size alone "
+                        "does not determine GPU requirements — model size does."
                     ),
                     "estimated_savings_pct": 50,
+                    "confidence": "low (dataset-size proxy; confirm with VRAM/utilization data)",
                 })
 
     # 3. Spot instance recommendation
@@ -585,20 +649,36 @@ def generate_cost_report(
     analysis = analyze_experiment_history(records)
     optimizations = identify_optimizations(records)
 
-    # Calculate potential savings
+    # Calculate potential savings.
+    #
+    # Savings do NOT add: spot pricing, right-sizing, and mixed precision all
+    # discount the same GPU-hours, so summing their percentages can exceed 100%
+    # of spend. Compose them multiplicatively on the addressable share of cost
+    # (1 - prod(1 - s_i)) and cap the result, which is the correct way to combine
+    # overlapping percentage reductions.
     total_cost = analysis["summary"]["total_cost_usd"]
-    potential_savings = 0
+    ADDRESSABLE_SHARE = 0.3   # rough: each recommendation touches ~30% of spend
+    MAX_SAVINGS_FRACTION = 0.7   # never claim more than 70% of total spend
+
+    remaining = 1.0
     for opt in optimizations:
-        savings_pct = opt.get("estimated_savings_pct", 0)
-        # Apply savings to the portion of cost that the recommendation addresses
-        # (rough: assume each optimization addresses ~30% of total cost)
-        potential_savings += total_cost * 0.3 * (savings_pct / 100)
+        savings_pct = min(max(opt.get("estimated_savings_pct", 0), 0), 100) / 100.0
+        remaining *= (1.0 - savings_pct * ADDRESSABLE_SHARE)
+    combined_fraction = min(1.0 - remaining, MAX_SAVINGS_FRACTION)
+    potential_savings = total_cost * combined_fraction
 
     report = {
         "report_generated_at": datetime.now().isoformat(),
         "analysis": analysis,
         "optimizations": optimizations,
         "potential_monthly_savings_usd": round(potential_savings, 2),
+        "potential_savings_pct_of_total": round(combined_fraction * 100, 1),
+        "savings_estimate_method": (
+            "Overlapping reductions composed multiplicatively over an assumed "
+            f"{ADDRESSABLE_SHARE:.0%} addressable share of spend, capped at "
+            f"{MAX_SAVINGS_FRACTION:.0%}. Recommendations overlap (they discount the "
+            "same GPU-hours), so per-recommendation percentages must not be summed."
+        ),
         "optimization_summary": {
             "total_recommendations": len(optimizations),
             "high_priority": sum(1 for o in optimizations if o.get("priority") == "HIGH"),

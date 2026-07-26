@@ -12,6 +12,7 @@ Usage:
     python prediction_logger.py --action export --db-path preds.db --output predictions.parquet
 """
 import argparse
+import contextlib
 import json
 import logging
 import sqlite3
@@ -44,8 +45,20 @@ class PredictionLogger:
             conn.executescript(self.SCHEMA)
         logger.info(f"Database ready at {self.db_path}")
 
+    @contextlib.contextmanager
     def _conn(self):
-        return sqlite3.connect(self.db_path)
+        """
+        Yield a connection that is committed and CLOSED on exit.
+
+        `with sqlite3.connect(...) as conn:` only manages the transaction — it
+        does not close the connection, so every call leaked a file handle.
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def log(self, input_features, prediction, probability=None,
             model_version=None, latency_ms=None, request_id=None):

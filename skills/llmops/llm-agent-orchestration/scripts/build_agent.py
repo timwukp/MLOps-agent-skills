@@ -3,24 +3,32 @@
 
 Usage:
     python build_agent.py --system-prompt "You are a helpful assistant." --tools all
-    python build_agent.py --tools calculator,python --max-iterations 5
-    python build_agent.py --model gpt-4o --tools all --human-in-loop
+    python build_agent.py --tools calculator,file --max-iterations 5
+    python build_agent.py --model gpt-5 --tools all --human-in-loop
     python build_agent.py --system-prompt "Research assistant" --tools file,calculator
+
+Security: the python_executor tool runs arbitrary Python with your privileges and
+is disabled unless --enable-python-executor is passed. See its docstring.
 """
 import argparse
+import ast
 import json
 import logging
 import math
+import operator
 import os
 import re
+import subprocess
 import sys
-import time
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+PYTHON_EXEC_TIMEOUT_S = 10
 
 
 # ---------------------------------------------------------------------------
@@ -46,43 +54,132 @@ def tool_web_search(query: str, num_results: int = 3) -> str:
     return json.dumps(results, indent=2)
 
 
+# Arithmetic evaluator built on the AST, not eval(). `eval` with a stripped
+# __builtins__ is NOT a sandbox: an attacker reaches arbitrary code through
+# attribute traversal (e.g. ().__class__.__base__.__subclasses__()). Here only
+# an explicit whitelist of node types, operators and functions can execute, so
+# there is no path to attribute access, subscripting, or calls at all.
+_SAFE_BINOPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+}
+_SAFE_UNARYOPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+# math functions that take/return plain numbers, plus a few builtins.
+_SAFE_FUNCTIONS = {
+    name: getattr(math, name) for name in (
+        "sqrt", "log", "log2", "log10", "exp", "sin", "cos", "tan", "asin",
+        "acos", "atan", "atan2", "hypot", "ceil", "floor", "fabs", "factorial",
+        "degrees", "radians", "gcd", "trunc", "copysign", "fmod", "pow", "dist",
+    )
+}
+_SAFE_FUNCTIONS.update({"abs": abs, "round": round, "min": min, "max": max, "sum": sum})
+_SAFE_CONSTANTS = {"pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf}
+# Guard against expressions that are cheap to write but expensive to evaluate.
+MAX_EXPRESSION_LEN = 500
+MAX_POW_EXPONENT = 1000
+
+
+def _eval_node(node):
+    """Recursively evaluate a whitelisted arithmetic AST node."""
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float, complex)) and not isinstance(node.value, bool):
+            return node.value
+        raise ValueError(f"unsupported constant: {node.value!r}")
+    if isinstance(node, ast.Name):
+        if node.id in _SAFE_CONSTANTS:
+            return _SAFE_CONSTANTS[node.id]
+        raise ValueError(f"unknown name '{node.id}'")
+    if isinstance(node, ast.BinOp):
+        op = _SAFE_BINOPS.get(type(node.op))
+        if op is None:
+            raise ValueError(f"unsupported operator: {type(node.op).__name__}")
+        left, right = _eval_node(node.left), _eval_node(node.right)
+        if op is operator.pow and abs(right) > MAX_POW_EXPONENT:
+            raise ValueError(f"exponent too large (>{MAX_POW_EXPONENT})")
+        return op(left, right)
+    if isinstance(node, ast.UnaryOp):
+        op = _SAFE_UNARYOPS.get(type(node.op))
+        if op is None:
+            raise ValueError(f"unsupported unary operator: {type(node.op).__name__}")
+        return op(_eval_node(node.operand))
+    if isinstance(node, ast.Call):
+        # Only bare `name(...)` calls; `obj.attr(...)` is rejected because the
+        # func is an ast.Attribute, which is not in the whitelist.
+        if not isinstance(node.func, ast.Name):
+            raise ValueError("only direct function calls are allowed")
+        fn = _SAFE_FUNCTIONS.get(node.func.id)
+        if fn is None:
+            raise ValueError(f"function '{node.func.id}' is not allowed")
+        if node.keywords:
+            raise ValueError("keyword arguments are not supported")
+        return fn(*[_eval_node(a) for a in node.args])
+    if isinstance(node, ast.Tuple):
+        return tuple(_eval_node(e) for e in node.elts)
+    raise ValueError(f"unsupported syntax: {type(node).__name__}")
+
+
+def safe_eval_arithmetic(expression: str):
+    """Evaluate an arithmetic expression without eval()/exec().
+
+    Supports + - * / // % **, unary +/-, numeric literals, the constants
+    pi/e/tau/inf and the whitelisted math functions in _SAFE_FUNCTIONS.
+    Raises ValueError for anything else.
+    """
+    if len(expression) > MAX_EXPRESSION_LEN:
+        raise ValueError(f"expression longer than {MAX_EXPRESSION_LEN} characters")
+    tree = ast.parse(expression, mode="eval")
+    return _eval_node(tree)
+
+
 def tool_calculator(expression: str) -> str:
-    """Evaluate a mathematical expression safely."""
+    """Evaluate a mathematical expression with an AST whitelist (no eval)."""
     logger.info(f"[calculator] expression={expression!r}")
-    allowed_names = {
-        k: v for k, v in math.__dict__.items() if not k.startswith("_")
-    }
-    allowed_names.update({"abs": abs, "round": round, "min": min, "max": max})
     try:
-        result = eval(expression, {"__builtins__": {}}, allowed_names)  # noqa: S307
-        return str(result)
+        return str(safe_eval_arithmetic(expression))
+    except SyntaxError as exc:
+        return f"Error: invalid expression ({exc.msg})"
     except Exception as exc:
         return f"Error: {exc}"
 
 
 def tool_python_executor(code: str) -> str:
-    """Execute a restricted Python snippet and capture its printed output."""
-    logger.info(f"[python_executor] code length={len(code)}")
-    blocked = ["import os", "import sys", "subprocess", "__import__", "open(", "exec(", "eval("]
-    for pattern in blocked:
-        if pattern in code:
-            return f"Blocked: '{pattern}' is not allowed in restricted mode."
-    from io import StringIO
-    buf = StringIO()
-    old_stdout = sys.stdout
-    try:
-        sys.stdout = buf
-        exec(code, {"__builtins__": {"print": print, "range": range, "len": len,  # noqa: S102
-                                      "int": int, "float": float, "str": str,
-                                      "list": list, "dict": dict, "sorted": sorted,
-                                      "enumerate": enumerate, "zip": zip, "sum": sum,
-                                      "min": min, "max": max, "abs": abs, "round": round,
-                                      "math": math, "True": True, "False": False, "None": None}})
-        return buf.getvalue() or "(no output)"
-    except Exception as exc:
-        return f"Error: {exc}"
-    finally:
-        sys.stdout = old_stdout
+    """Run a Python snippet in a subprocess. NOT A SANDBOX - see warning below.
+
+    UNSAFE FOR UNTRUSTED INPUT. This runs arbitrary Python with the privileges of
+    the current user. The subprocess boundary only limits blast radius on crash
+    and enforces a wall-clock timeout; it does NOT restrict filesystem access,
+    network access, or resource usage, and no blocklist of forbidden substrings
+    can make it safe (imports can be spelled `__import__`, built via getattr,
+    obtained from object.__subclasses__(), decoded from base64, and so on).
+
+    Only enable this tool when the code originates from a trusted operator. For
+    model-generated or user-supplied code use real isolation:
+      - a container with no network, a read-only rootfs, dropped capabilities and
+        cpu/memory limits (gVisor/Firecracker for a stronger boundary), or
+      - a hosted code-interpreter sandbox (E2B, Modal, Daytona, or the provider's
+        own code-execution tool).
+    """
+    logger.warning("[python_executor] executing untrusted-capable code in a subprocess; "
+                   "this is NOT a security sandbox (code length=%d)", len(code))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script = Path(tmpdir) / "snippet.py"
+        script.write_text(code, encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-I", str(script)],
+                capture_output=True, text=True, timeout=PYTHON_EXEC_TIMEOUT_S,
+                cwd=tmpdir,
+            )
+        except subprocess.TimeoutExpired:
+            return f"Error: execution exceeded {PYTHON_EXEC_TIMEOUT_S}s timeout"
+        except OSError as exc:
+            return f"Error: could not start interpreter: {exc}"
+    if proc.returncode != 0:
+        return f"Error (exit {proc.returncode}):\n{proc.stderr.strip()[:2000]}"
+    return proc.stdout.strip()[:4000] or "(no output)"
 
 
 def tool_file_reader(path: str, max_lines: int = 50) -> str:
@@ -108,13 +205,17 @@ BUILTIN_TOOLS: Dict[str, ToolDefinition] = {
     ),
     "calculator": ToolDefinition(
         name="calculator",
-        description="Evaluate a mathematical expression (e.g. '2**10 + math.sqrt(144)').",
+        description=("Evaluate an arithmetic expression, e.g. '2**10 + sqrt(144)'. "
+                     "Supports + - * / // % ** and math functions by bare name "
+                     "(sqrt, log, sin, ...); pi/e/tau are available."),
         parameters={"expression": {"type": "string", "required": True}},
         callable_fn=tool_calculator,
     ),
+    # UNSAFE for untrusted input - opt in with --enable-python-executor.
     "python": ToolDefinition(
         name="python_executor",
-        description="Execute a short Python snippet in a restricted sandbox and return printed output.",
+        description=("Execute a short Python snippet in a subprocess and return its stdout. "
+                     "NOT SANDBOXED - runs with full user privileges."),
         parameters={"code": {"type": "string", "required": True}},
         callable_fn=tool_python_executor,
     ),
@@ -198,7 +299,7 @@ class Agent:
         self,
         system_prompt: str = "You are a helpful assistant.",
         tools: Optional[List[ToolDefinition]] = None,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-5-mini",
         max_iterations: int = 10,
         human_in_loop: bool = False,
         api_base: Optional[str] = None,
@@ -209,22 +310,32 @@ class Agent:
         self.model = model
         self.max_iterations = max_iterations
         self.human_in_loop = human_in_loop
-        self.api_base = api_base or os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        # OPENAI_BASE_URL is the openai>=1.0 variable; OPENAI_API_BASE was v0.
+        self.api_base = api_base or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        # Pass None (not "") so the SDK's own env/keyring resolution still applies
+        # and a missing key raises a clear error instead of a 401.
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or None
         self.memory = Memory()
+        self._client = None
 
     # -- LLM call (OpenAI-compatible) ---------------------------------------
+    def _get_client(self):
+        """Create the OpenAI client once and reuse it (connection pooling)."""
+        if self._client is None:
+            try:
+                from openai import OpenAI
+            except ImportError:
+                logger.error("Install: pip install openai")
+                sys.exit(1)
+            self._client = OpenAI(base_url=self.api_base, api_key=self.api_key)
+        return self._client
+
     def _call_llm(self, messages: List[Dict[str, str]]) -> str:
-        try:
-            from openai import OpenAI
-        except ImportError:
-            logger.error("Install: pip install openai")
-            sys.exit(1)
-        client = OpenAI(base_url=self.api_base, api_key=self.api_key)
-        response = client.chat.completions.create(
+        response = self._get_client().chat.completions.create(
             model=self.model, messages=messages, temperature=0.2, max_tokens=1024,
         )
-        return response.choices[0].message.content.strip()
+        # .content is None when the model returns only tool calls or is filtered.
+        return (response.choices[0].message.content or "").strip()
 
     # -- Tool descriptions for the prompt ------------------------------------
     def _tool_descriptions(self) -> str:
@@ -235,23 +346,40 @@ class Agent:
         return "\n".join(lines) or "(no tools available)"
 
     # -- Parsing helpers -----------------------------------------------------
-    @staticmethod
-    def _parse_action(text: str):
-        """Extract tool name and JSON args from 'Action: tool_name({...})'."""
-        match = re.search(r"Action:\s*(\w+)\((.+)\)\s*$", text, re.DOTALL | re.MULTILINE)
+    def _first_required_param(self, name: str) -> Optional[str]:
+        """First required parameter of a tool, used for bare-string arguments."""
+        tool = self.tools.get(name)
+        if not tool:
+            return None
+        for pname, spec in tool.parameters.items():
+            if isinstance(spec, dict) and spec.get("required"):
+                return pname
+        return next(iter(tool.parameters), None)
+
+    def _parse_action(self, text: str):
+        """Extract tool name and args from 'Action: tool_name({...})'.
+
+        Non-greedy and single-line: a greedy DOTALL match would swallow every
+        line after the action (including a following Thought) into the args.
+        """
+        match = re.search(r"^\s*Action:\s*(\w+)\((.*?)\)\s*$", text, re.MULTILINE)
         if not match:
             return None, None
         name = match.group(1)
         raw_args = match.group(2).strip()
         try:
-            args = json.loads(raw_args)
+            parsed = json.loads(raw_args)
         except json.JSONDecodeError:
-            # Try wrapping bare strings
-            if ":" not in raw_args:
-                args = {"expression": raw_args} if name == "calculator" else {"query": raw_args}
-            else:
-                args = {"query": raw_args}
-        return name, args
+            parsed = None
+        if isinstance(parsed, dict):
+            return name, parsed
+        # Bare value (or a JSON scalar): bind it to the tool's own first required
+        # parameter instead of guessing "query"/"expression".
+        value = parsed if parsed is not None else raw_args.strip("\"'")
+        param = self._first_required_param(name)
+        if param is None:
+            return name, {}
+        return name, {param: value}
 
     # -- Execute a tool with optional human confirmation ---------------------
     def _execute_tool(self, name: str, args: Dict[str, Any]) -> str:
@@ -266,9 +394,14 @@ class Agent:
 
         tool = self.tools[name]
         try:
-            return tool.callable_fn(**args)
+            return tool.callable_fn(**(args or {}))
         except TypeError as exc:
-            return f"Error calling {name}: {exc}"
+            return f"Error calling {name}: bad arguments ({exc})"
+        except Exception as exc:
+            # A failing tool must not kill the loop - feed the error back as an
+            # observation so the agent can recover or report it.
+            logger.warning(f"Tool '{name}' raised {type(exc).__name__}: {exc}")
+            return f"Error: {name} failed with {type(exc).__name__}: {exc}"
 
     # -- Main agent loop -----------------------------------------------------
     def run(self, query: str) -> AgentResult:
@@ -317,17 +450,28 @@ class Agent:
 # CLI
 # ---------------------------------------------------------------------------
 
-def resolve_tools(tool_names: List[str]) -> List[ToolDefinition]:
-    """Map CLI tool names to ToolDefinition objects."""
-    if "all" in tool_names:
-        return list(BUILTIN_TOOLS.values())
+UNSAFE_TOOLS = {"python"}  # require an explicit opt-in flag
+
+
+def resolve_tools(tool_names: List[str], allow_unsafe: bool = False) -> List[ToolDefinition]:
+    """Map CLI tool names to ToolDefinition objects.
+
+    Tools in UNSAFE_TOOLS execute arbitrary code and are excluded unless
+    allow_unsafe is set, including when "all" is requested.
+    """
+    requested = ([n for n in BUILTIN_TOOLS] if "all" in tool_names
+                 else [n.strip() for n in tool_names])
     resolved = []
-    for name in tool_names:
-        name = name.strip()
-        if name in BUILTIN_TOOLS:
-            resolved.append(BUILTIN_TOOLS[name])
-        else:
+    for name in requested:
+        if name not in BUILTIN_TOOLS:
             logger.warning(f"Unknown tool '{name}', skipping. Available: {list(BUILTIN_TOOLS.keys())}")
+            continue
+        if name in UNSAFE_TOOLS and not allow_unsafe:
+            logger.warning(
+                f"Tool '{name}' executes arbitrary code and is NOT sandboxed; skipping. "
+                f"Pass --enable-python-executor to enable it (trusted input only).")
+            continue
+        resolved.append(BUILTIN_TOOLS[name])
     return resolved
 
 
@@ -335,17 +479,23 @@ def main():
     parser = argparse.ArgumentParser(description="Tool-using LLM agent builder (ReAct)")
     parser.add_argument("--system-prompt", default="You are a helpful assistant.",
                         help="System prompt for the agent")
-    parser.add_argument("--model", default="gpt-4o-mini", help="LLM model name")
+    parser.add_argument("--model", default="gpt-5-mini", help="LLM model name")
     parser.add_argument("--tools", default="all",
                         help="Comma-separated tool list: calculator,python,file,web_search,all")
     parser.add_argument("--max-iterations", type=int, default=10, help="Max ReAct loop iterations")
     parser.add_argument("--human-in-loop", action="store_true",
                         help="Require human confirmation before each tool call")
+    parser.add_argument("--enable-python-executor", action="store_true",
+                        help="Enable the python_executor tool. It is NOT sandboxed and runs "
+                             "arbitrary code as the current user - trusted input only")
     parser.add_argument("--api-base", default=None, help="OpenAI-compatible API base URL")
     parser.add_argument("--verbose", action="store_true", help="Print full reasoning trace")
     args = parser.parse_args()
 
-    tool_list = resolve_tools(args.tools.split(","))
+    tool_list = resolve_tools(args.tools.split(","), allow_unsafe=args.enable_python_executor)
+    if args.enable_python_executor:
+        logger.warning("python_executor ENABLED: model-generated code will run unsandboxed. "
+                       "Consider --human-in-loop and container isolation.")
     logger.info(f"Agent initialized: model={args.model}, tools={[t.name for t in tool_list]}, "
                 f"max_iter={args.max_iterations}, human_in_loop={args.human_in_loop}")
 

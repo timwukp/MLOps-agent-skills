@@ -9,10 +9,10 @@ thresholds are breached.
 
 Typical usage:
     python drift_monitor.py --reference ref.csv --current-dir ./incoming \
-        --interval 5 --threshold 0.25 --history-file drift_history.jsonl
+        --interval 5 --psi-threshold 0.2 --ks-threshold 0.1 --history-file drift_history.jsonl
 
     python drift_monitor.py --reference ref.csv --current-dir ./incoming \
-        --interval 10 --threshold 0.20 --webhook-url https://hooks.example.com/drift \
+        --interval 10 --psi-threshold 0.2 --webhook-url https://hooks.example.com/drift \
         --retrain-signal retrain.flag
 """
 
@@ -39,28 +39,42 @@ EPSILON = 1e-10  # smoothing constant for PSI
 # Statistical helpers (self-contained, no numpy/scipy dependency)
 # ---------------------------------------------------------------------------
 
-def _histogram(values: List[float], bins: int = 10):
-    """Return bin edges and normalised frequencies."""
-    if not values:
-        return [], []
+def _bin_edges(values: List[float], bins: int = 10) -> List[float]:
+    """Equal-width bin edges spanning *values* (open-ended at both extremes)."""
     lo, hi = min(values), max(values)
     if lo == hi:
         hi = lo + 1.0
     width = (hi - lo) / bins
-    counts = [0] * bins
-    for v in values:
-        idx = min(int((v - lo) / width), bins - 1)
-        counts[idx] += 1
-    total = len(values)
-    freqs = [(c / total) if total else 0 for c in counts]
     edges = [lo + i * width for i in range(bins + 1)]
-    return edges, freqs
+    edges[0] = -math.inf
+    edges[-1] = math.inf
+    return edges
+
+
+def _bin_freqs(values: List[float], edges: List[float]) -> List[float]:
+    """Normalised frequencies of *values* within the given shared *edges*."""
+    counts = [0] * (len(edges) - 1)
+    for v in values:
+        for i in range(len(edges) - 1):
+            if edges[i] <= v < edges[i + 1] or (i == len(edges) - 2 and v >= edges[i]):
+                counts[i] += 1
+                break
+    total = len(values)
+    return [(c / total) if total else 0 for c in counts]
 
 
 def compute_psi(reference: List[float], current: List[float], bins: int = 10) -> float:
-    """Population Stability Index between two distributions."""
-    _, ref_freq = _histogram(reference, bins)
-    _, cur_freq = _histogram(current, bins)
+    """Population Stability Index between two distributions.
+
+    Bin edges are derived from the reference data and shared by both samples,
+    so a location shift in the current data changes bin occupancy (and PSI)
+    instead of being hidden by per-dataset binning.
+    """
+    if not reference or not current:
+        return 0.0
+    edges = _bin_edges(reference, bins)
+    ref_freq = _bin_freqs(reference, edges)
+    cur_freq = _bin_freqs(current, edges)
     psi = 0.0
     for r, c in zip(ref_freq, cur_freq):
         r = max(r, EPSILON)
@@ -70,7 +84,11 @@ def compute_psi(reference: List[float], current: List[float], bins: int = 10) ->
 
 
 def compute_ks(reference: List[float], current: List[float]) -> float:
-    """Two-sample Kolmogorov-Smirnov statistic."""
+    """Two-sample Kolmogorov-Smirnov statistic.
+
+    Note: this pure-Python implementation is O(n*m); for large samples
+    prefer scipy.stats.ks_2samp.
+    """
     all_vals = sorted(set(reference + current))
     if not all_vals:
         return 0.0
@@ -100,7 +118,11 @@ def compute_ks(reference: List[float], current: List[float]) -> float:
 # ---------------------------------------------------------------------------
 
 def _read_csv_numeric(path: str) -> Dict[str, List[float]]:
-    """Read a CSV file and return numeric columns as lists of floats."""
+    """Read a CSV file and return numeric columns as lists of floats.
+
+    Non-numeric cells are silently dropped, so a column with mixed content
+    contributes only its parseable values.
+    """
     columns: Dict[str, List[float]] = {}
     with open(path, newline="") as fh:
         reader = csv.DictReader(fh)
@@ -144,12 +166,14 @@ class DriftResult:
 class DriftMonitor:
     """Periodically compare reference data against a sliding window of current data."""
 
-    def __init__(self, reference_path: str, current_dir: str, threshold: float = 0.25,
-                 window_size: int = 5, history_file: str = "drift_history.jsonl",
+    def __init__(self, reference_path: str, current_dir: str, psi_threshold: float = 0.2,
+                 ks_threshold: float = 0.1, window_size: int = 5,
+                 history_file: str = "drift_history.jsonl",
                  webhook_url: Optional[str] = None, retrain_signal: Optional[str] = None):
         self.reference = _read_csv_numeric(reference_path)
         self.current_dir = current_dir
-        self.threshold = threshold
+        self.psi_threshold = psi_threshold
+        self.ks_threshold = ks_threshold
         self.window_size = window_size
         self.history_file = history_file
         self.webhook_url = webhook_url
@@ -172,7 +196,7 @@ class DriftMonitor:
                 continue
             psi = compute_psi(ref_vals, cur_vals)
             ks = compute_ks(ref_vals, cur_vals)
-            drifted = psi > self.threshold or ks > self.threshold
+            drifted = psi > self.psi_threshold or ks > self.ks_threshold
             results.append(DriftResult(ts, col, round(psi, 6), round(ks, 6), drifted))
             if drifted:
                 any_drift = True
@@ -185,8 +209,8 @@ class DriftMonitor:
 
     def run_loop(self, interval_minutes: float) -> None:
         """Blocking loop that calls *check_once* every *interval_minutes*."""
-        logger.info("Starting drift monitor loop (interval=%s min, threshold=%s)",
-                     interval_minutes, self.threshold)
+        logger.info("Starting drift monitor loop (interval=%s min, psi_threshold=%s, ks_threshold=%s)",
+                     interval_minutes, self.psi_threshold, self.ks_threshold)
         try:
             while True:
                 self.check_once()
@@ -205,7 +229,8 @@ class DriftMonitor:
 
     def _fire_alert(self, results: List[DriftResult]) -> None:
         drifted = [r for r in results if r.drifted]
-        msg = f"Drift alert: {len(drifted)} column(s) exceeded threshold {self.threshold}"
+        msg = (f"Drift alert: {len(drifted)} column(s) exceeded thresholds "
+               f"(PSI>{self.psi_threshold} or KS>{self.ks_threshold})")
         for r in drifted:
             msg += f"\n  {r.column}: PSI={r.psi} KS={r.ks}"
         logger.warning(msg)
@@ -276,7 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--current-dir", required=True, help="Directory with timestamped CSV files")
     p.add_argument("--interval", type=float, default=5, help="Check interval in minutes")
     p.add_argument("--window-size", type=int, default=5, help="Number of recent files to merge")
-    p.add_argument("--threshold", type=float, default=0.25, help="Drift threshold (PSI/KS)")
+    p.add_argument("--psi-threshold", type=float, default=0.2,
+                   help="PSI drift threshold (industry convention: 0.2 = significant)")
+    p.add_argument("--ks-threshold", type=float, default=0.1,
+                   help="KS statistic drift threshold (D statistic, 0-1 scale)")
     p.add_argument("--webhook-url", help="Webhook URL for drift alerts")
     p.add_argument("--history-file", default="drift_history.jsonl", help="JSONL history path")
     p.add_argument("--retrain-signal", help="Path to write retrain signal JSON file")
@@ -303,7 +331,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     monitor = DriftMonitor(
         reference_path=args.reference,
         current_dir=args.current_dir,
-        threshold=args.threshold,
+        psi_threshold=args.psi_threshold,
+        ks_threshold=args.ks_threshold,
         window_size=args.window_size,
         history_file=args.history_file,
         webhook_url=args.webhook_url,

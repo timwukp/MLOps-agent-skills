@@ -40,12 +40,10 @@ import json
 import logging
 import os
 import pickle
-import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification
 from sklearn.ensemble import RandomForestClassifier
@@ -93,15 +91,30 @@ def _get_artifact_dir(run_id: str, stage: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _run_timestamp(context: dict) -> Any:
+    """
+    Return the run's logical timestamp across Airflow versions.
+
+    Airflow 3.x removed `context["execution_date"]` (and the `execution_date`
+    template variable). `logical_date` is the replacement; fall back to
+    `data_interval_start`, then `run_id`, so callbacks never KeyError.
+    """
+    for key in ("logical_date", "data_interval_start", "execution_date"):
+        value = context.get(key)
+        if value is not None:
+            return value
+    return context.get("run_id", "unknown")
+
+
 def _on_failure(context: dict) -> None:
     """Called when any task fails. Replace the print with your alerting logic."""
     ti = context["task_instance"]
     dag_id = context["dag"].dag_id
-    exec_date = context["execution_date"]
+    logical_date = _run_timestamp(context)
     exception = context.get("exception", "N/A")
     msg = (
         f"[ALERT] Task FAILED -- DAG: {dag_id}, Task: {ti.task_id}, "
-        f"Execution Date: {exec_date}, Exception: {exception}"
+        f"Logical Date: {logical_date}, Exception: {exception}"
     )
     logger.error(msg)
     # TODO: Replace with Slack / PagerDuty / email integration
@@ -111,8 +124,7 @@ def _on_failure(context: dict) -> None:
 def _on_success(context: dict) -> None:
     """Called when the entire DAG succeeds."""
     dag_id = context["dag"].dag_id
-    exec_date = context["execution_date"]
-    msg = f"[INFO] DAG succeeded -- DAG: {dag_id}, Execution Date: {exec_date}"
+    msg = f"[INFO] DAG succeeded -- DAG: {dag_id}, Logical Date: {_run_timestamp(context)}"
     logger.info(msg)
 
 
@@ -206,13 +218,20 @@ def validate_data(**context) -> dict:
 def check_validation(**context) -> str:
     """
     Branch: proceed to feature engineering if validation passed,
-    otherwise jump to the failure notification task.
+    otherwise jump to the validation-failure notification task.
+
+    NOTE: a BranchPythonOperator may only return task_ids that are DIRECT
+    downstream neighbours; anything else is silently never run (and raises in
+    newer Airflow). This branch therefore targets `notify_validation_failure`,
+    which is wired directly downstream of it, rather than sharing the quality
+    gate's `notify_failure` task. Sharing one alert task between two branches
+    also breaks: whichever branch runs first marks the shared task as skipped.
     """
     ti = context["ti"]
     validation: dict = ti.xcom_pull(task_ids="data_pipeline.validate_data")
     if validation["passed"]:
         return "data_pipeline.engineer_features"
-    return "notify_failure"
+    return "notify_validation_failure"
 
 
 def engineer_features(**context) -> dict:
@@ -450,7 +469,8 @@ def register_model(**context) -> dict:
     # Simulate registration
     registry_dir = Path(_get_var("ml_artifact_root", "/tmp/ml_pipeline/artifacts")) / "registry"
     registry_dir.mkdir(parents=True, exist_ok=True)
-    version = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    # datetime.utcnow() is deprecated in 3.12 and returns a naive datetime.
+    version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     registered_path = str(registry_dir / f"model_v{version}.pkl")
 
     import shutil
@@ -466,7 +486,7 @@ def register_model(**context) -> dict:
             "auc_roc": eval_metrics["auc_roc"],
         },
         "hyperparams": model_meta["hyperparams"],
-        "registered_at": datetime.utcnow().isoformat(),
+        "registered_at": datetime.now(timezone.utc).isoformat(),
     }
 
     manifest_path = str(registry_dir / f"manifest_v{version}.json")
@@ -556,8 +576,9 @@ with DAG(
         "End-to-end ML training pipeline: ingest, validate, feature engineer, "
         "train, evaluate, and register models with quality gating."
     ),
-    schedule_interval="0 2 * * *",  # Daily at 2:00 AM UTC
-    start_date=datetime(2024, 1, 1),
+    # Airflow 3.x: `schedule_interval` was removed — use `schedule`.
+    schedule="0 2 * * *",  # Daily at 2:00 AM UTC
+    start_date=datetime(2024, 1, 1),  # static: never use days_ago()/utcnow()
     catchup=False,
     max_active_runs=1,
     tags=["ml", "training", "production"],
@@ -645,7 +666,16 @@ with DAG(
         task_id="notify_failure",
         python_callable=notify_failure,
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
-        doc_md="Send failure notification with reasons.",
+        doc_md="Send failure notification when the quality gate rejects the model.",
+    )
+
+    # Separate alert task for the data-validation branch. It must be a direct
+    # downstream neighbour of t_branch_validation for the branch to reach it.
+    t_notify_validation_failure = PythonOperator(
+        task_id="notify_validation_failure",
+        python_callable=notify_failure,
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+        doc_md="Send failure notification when data validation rejects the dataset.",
     )
 
     # ---- DAG wiring ---------------------------------------------------------
@@ -657,5 +687,8 @@ with DAG(
     t_quality_gate >> t_register >> t_notify_success
     t_quality_gate >> t_notify_failure
 
-    # Validation branch can also route to notify_failure
-    # (already handled by BranchPythonOperator returning "notify_failure")
+    # Data-validation branch -> validation failure alert.
+    # Without this edge the branch's "notify_validation_failure" return value
+    # points at a task that is not downstream, so a validation failure produced
+    # NO alert at all — the DAG just ended with everything skipped.
+    t_branch_validation >> t_notify_validation_failure

@@ -18,7 +18,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -36,7 +36,7 @@ online_store:
   type: {online_store_type}
 {online_store_extra}offline_store:
   type: file
-entity_key_serialization_version: 2
+entity_key_serialization_version: 3
 """
 
 
@@ -74,12 +74,12 @@ def build_demo_definitions():
     Imports are deferred so the module can be loaded without Feast installed
     when only the ``init`` action is used.
     """
-    from feast import Entity, FeatureView, Field, FileSource, ValueType
+    from feast import Entity, FeatureView, Field, FileSource
     from feast.types import Float64, Int64, String
 
     customer = Entity(
-        name="customer_id",
-        value_type=ValueType.INT64,
+        name="customer",
+        join_keys=["customer_id"],  # value_type=ValueType.* is deprecated
         description="Unique customer identifier",
     )
 
@@ -127,7 +127,7 @@ def apply_definitions(repo_path):
 def materialize_features(repo_path, start_date=None, end_date=None):
     """Materialize features from the offline store into the online store."""
     store = get_store(repo_path)
-    end = end_date or datetime.utcnow()
+    end = end_date or datetime.now(timezone.utc)
     start = start_date or (end - timedelta(days=7))
     logger.info("Materializing features from %s to %s", start.isoformat(), end.isoformat())
     store.materialize(start_date=start, end_date=end)

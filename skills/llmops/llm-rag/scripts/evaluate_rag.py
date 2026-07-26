@@ -43,7 +43,9 @@ def retrieve_from_chromadb(question, db_path, collection_name="documents",
     collection = client.get_collection(collection_name)
     emb = model.encode(question).tolist()
     results = collection.query(query_embeddings=[emb], n_results=top_k)
-    return [{"text": doc, "score": round(1 - dist, 4)}
+    # Similarity = 1 - distance is only valid for cosine distance (range 0-2);
+    # clamp at 0 so L2/other metrics don't produce negative scores.
+    return [{"text": doc, "score": round(max(0.0, 1 - dist), 4)}
             for doc, dist in zip(results["documents"][0], results["distances"][0])]
 
 # --- Retrieval metrics ---
@@ -196,11 +198,15 @@ def evaluate_example(ex, db_path, top_k, emb_model, do_ret, do_gen):
         result["retrieval"] = retrieval_metrics(retrieved_texts, gt_ctx)
     if retrieved_texts:
         result["context_relevance"] = context_relevance(question, retrieved_texts)
-    prediction = ex.get("predicted_answer", ground_truth)
+    prediction = ex.get("predicted_answer")
     if do_gen and ground_truth:
-        result["generation"] = generation_metrics(prediction, ground_truth)
-        if retrieved_texts:
-            result["faithfulness"] = faithfulness_score(prediction, retrieved_texts)
+        if prediction is None:
+            # Falling back to ground_truth would yield trivially perfect scores
+            logger.warning(f"No 'predicted_answer' for question: {question[:60]} - skipping generation metrics")
+        else:
+            result["generation"] = generation_metrics(prediction, ground_truth)
+            if retrieved_texts:
+                result["faithfulness"] = faithfulness_score(prediction, retrieved_texts)
     return result
 
 def aggregate(results):

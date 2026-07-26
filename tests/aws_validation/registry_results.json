@@ -1,0 +1,44 @@
+[
+  {
+    "check": "s3-bucket",
+    "status": "PASS",
+    "detail": "bucket sagemaker-us-east-1-<ACCOUNT_ID> exists",
+    "seconds": 0.8
+  },
+  {
+    "check": "train-and-package (model-training pattern)",
+    "status": "PASS",
+    "detail": "trained acc=0.910, uploaded s3://sagemaker-us-east-1-<ACCOUNT_ID>/mlops-skills-validation/model.tar.gz",
+    "seconds": 25.4
+  },
+  {
+    "check": "create-model-package-group",
+    "status": "PASS",
+    "detail": "created group",
+    "seconds": 0.9
+  },
+  {
+    "check": "register-model-version (model-registry pattern)",
+    "status": "PASS",
+    "detail": "arn:aws:sagemaker:us-east-1:<ACCOUNT_ID>:model-package/mlops-skills-validation/1",
+    "seconds": 0.6
+  },
+  {
+    "check": "promote-pending-to-approved (promotion pattern)",
+    "status": "PASS",
+    "detail": "approved, status=Approved",
+    "seconds": 0.6
+  },
+  {
+    "check": "verify-lineage-and-metadata",
+    "status": "PASS",
+    "detail": "1 version(s), metadata intact",
+    "seconds": 0.6
+  },
+  {
+    "check": "cleanup",
+    "status": "PASS",
+    "detail": "deleted model packages, group, and S3 artifact",
+    "seconds": 1.3
+  }
+]

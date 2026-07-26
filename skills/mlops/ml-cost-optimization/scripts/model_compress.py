@@ -7,12 +7,29 @@ reducing model size and inference cost. Includes benchmarking to compare
 original vs. compressed model performance.
 
 Usage:
-    python model_compress.py quantize --model model.pt --method dynamic --output quantized.pt
-    python model_compress.py prune --model model.pt --method magnitude --sparsity 0.5 --output pruned.pt
-    python model_compress.py distill --teacher teacher.pt --student student.pt --data data/ --epochs 10
-    python model_compress.py benchmark --original model.pt --compressed compressed.pt --data data/
-    python model_compress.py compare --original model.pt --compressed compressed.pt
     python model_compress.py demo
+    python model_compress.py quantize --model model.pt --arch mlp --method dynamic --output quantized.pt
+    python model_compress.py prune --model model.pt --arch mlp --method magnitude --sparsity 0.5 --output pruned.pt
+    python model_compress.py distill --teacher teacher.pt --student student.pt --epochs 10
+    python model_compress.py benchmark --model model.pt --arch mlp --iterations 200
+    python model_compress.py compare --original model.pt --compressed pruned.pt --arch mlp
+
+IMPORTANT — CLI scope:
+    The CLI subcommands load a *state_dict* into one of the built-in demo
+    architectures selected by --arch (mlp | cnn | transformer_block). They cannot
+    reconstruct your own model class from a state_dict alone. For real models,
+    import the functions instead:
+
+        from model_compress import quantize_dynamic, prune_magnitude_unstructured
+        model = MyModel(); model.load_state_dict(torch.load("model.pt"))
+        compressed, result = quantize_dynamic(model)
+
+    Note also that a quantized state_dict contains packed INT8 params and CANNOT
+    be loaded back into the FP32 architecture, so `compare` cannot read the
+    output of `quantize`. Use `compare` for pruned models (same shapes/dtypes),
+    and use the in-process `compare_models()` helper — or save the whole
+    quantized module with torch.jit.save / torch.save(model) — to benchmark a
+    quantized model against its FP32 original.
 
 Dependencies:
     - Python 3.8+
@@ -37,10 +54,15 @@ try:
     import torch
     import torch.nn as nn
     import torch.nn.utils.prune as prune
-    import torch.quantization as quantization
+    # torch.quantization is a legacy alias; torch.ao.quantization is the
+    # maintained namespace (and the only one with the FX/PT2E entry points).
+    import torch.ao.quantization as quantization
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+# Built-in demo architectures the CLI can reconstruct from a state_dict.
+ARCHS = ("mlp", "cnn", "transformer_block")
 
 try:
     import numpy as np
@@ -178,6 +200,29 @@ def create_sample_input(model_type: str = "mlp", batch_size: int = 32) -> "torch
         raise ValueError(f"Unknown model type: {model_type}")
 
 
+def load_state_dict_into_arch(path: str, arch: str = "mlp") -> "nn.Module":
+    """
+    Load a state_dict from `path` into one of the built-in demo architectures.
+
+    This is a CLI convenience only: a state_dict does not carry the model class,
+    so the CLI cannot rebuild an arbitrary user model. Import the compression
+    functions directly for your own architectures (see the module docstring).
+    """
+    model = create_sample_model(arch)
+    obj = torch.load(path, map_location="cpu", weights_only=True)
+    state_dict = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError as e:
+        raise SystemExit(
+            f"State dict in '{path}' does not match the built-in '{arch}' "
+            f"architecture:\n  {e}\n"
+            f"Pass a matching --arch ({' | '.join(ARCHS)}), or import "
+            f"model_compress and pass your own instantiated model."
+        ) from e
+    return model
+
+
 # ---------------------------------------------------------------------------
 # Quantization
 # ---------------------------------------------------------------------------
@@ -196,8 +241,8 @@ def quantize_dynamic(model: "nn.Module", dtype=None) -> Tuple["nn.Module", Compr
     original_size = get_model_size_mb(model)
     original_params = count_parameters(model)
 
-    # Dynamic quantization targets Linear and LSTM layers
-    quantized = torch.quantization.quantize_dynamic(
+    # Dynamic quantization targets Linear and RNN layers
+    quantized = quantization.quantize_dynamic(
         model, {nn.Linear, nn.LSTM, nn.GRU}, dtype=dtype,
     )
 
@@ -225,38 +270,71 @@ def quantize_static(
     num_calibration_batches: int = 100,
 ) -> Tuple["nn.Module", CompressionResult]:
     """
-    Apply post-training static quantization.
+    Apply post-training static quantization (eager mode).
 
     Static quantization quantizes both weights and activations. Requires
     calibration data to determine activation ranges. Generally provides
     better accuracy than dynamic quantization.
+
+    LIMITATIONS of this eager-mode helper (read before using in production):
+      1. Eager mode needs explicit QuantStub/DeQuantStub at the model
+         boundary. This function wraps the model in a QuantWrapper to supply
+         them automatically, which works for feed-forward models whose forward()
+         takes and returns a single tensor. Models with control flow, multiple
+         inputs, or functional ops (F.relu, +) will NOT be fully quantized.
+      2. Module fusion (Conv+BN+ReLU, Linear+ReLU) is model-specific and is NOT
+         performed here. Without fusion, accuracy is worse and BatchNorm stays
+         in float. Call torch.ao.quantization.fuse_modules() on your own module
+         name list first.
+      3. For anything non-trivial, prefer the graph-based flows, which insert
+         observers and fuse automatically:
+             torch.ao.quantization.quantize_fx (FX graph mode), or
+             torch.ao.quantization.quantize_pt2e with torch.export (PT2E).
+
+    The input model is deep-copied, so the caller's model is left untouched.
     """
+    import copy
+
     original_size = get_model_size_mb(model)
     original_params = count_parameters(model)
 
-    # Prepare model for static quantization
-    model_prepared = model.cpu().eval()
+    # Deep copy: quantization.prepare(inplace=True) would otherwise attach
+    # observers to (and later mutate) the caller's model.
+    model_prepared = copy.deepcopy(model).cpu().eval()
 
-    # Fuse common patterns (Conv+BN+ReLU, Linear+ReLU)
-    # This is model-specific; here we handle Sequential models generically
+    # Supply the required quant/dequant boundary if the model does not have one.
+    has_stub = any(
+        isinstance(m, (quantization.QuantStub, quantization.DeQuantStub))
+        for m in model_prepared.modules()
+    )
+    wrapped = False
+    if not has_stub:
+        model_prepared = quantization.QuantWrapper(model_prepared)
+        wrapped = True
+
     model_prepared.qconfig = quantization.get_default_qconfig("x86")
     quantization.prepare(model_prepared, inplace=True)
 
     # Calibration pass
+    calibrated = False
     if calibration_data is not None:
         with torch.no_grad():
             for i, data in enumerate(calibration_data):
                 if i >= num_calibration_batches:
                     break
                 model_prepared(data)
+                calibrated = True
     else:
-        # Use random data for calibration if none provided
-        print("  No calibration data provided; using random inputs for calibration.")
+        # Random calibration produces meaningless activation ranges — it only
+        # exists so the demo path runs. Never ship a model calibrated this way.
+        print("  WARNING: no calibration data provided; calibrating on random "
+              "inputs. Activation ranges will be wrong — pass real data.")
         with torch.no_grad():
             for _ in range(num_calibration_batches):
                 dummy = torch.randn(1, 784)  # Assumes MLP input shape
                 try:
                     model_prepared(dummy)
+                    calibrated = True
                 except Exception:
                     break
 
@@ -267,6 +345,15 @@ def quantize_static(
     compressed_params = count_parameters(quantized)
     sparsity = calculate_sparsity(quantized)
 
+    notes = f"Static quantization with up to {num_calibration_batches} calibration batches."
+    if wrapped:
+        notes += " Model auto-wrapped in QuantWrapper (no QuantStub found)."
+    if calibration_data is None:
+        notes += " CALIBRATED ON RANDOM DATA — not production-usable."
+    if not calibrated:
+        notes += " Calibration failed (input shape mismatch?); ranges are defaults."
+    notes += " No module fusion applied; fuse Conv+BN+ReLU yourself or use FX/PT2E."
+
     result = CompressionResult(
         method="static_quantization",
         original_size_mb=round(original_size, 2),
@@ -275,7 +362,7 @@ def quantize_static(
         original_params=original_params,
         compressed_params=compressed_params,
         sparsity=round(sparsity, 4),
-        notes=f"Static quantization with {num_calibration_batches} calibration batches.",
+        notes=notes,
     )
 
     return quantized, result
@@ -414,11 +501,22 @@ def prune_structured(
     make_permanent: bool = True,
 ) -> Tuple["nn.Module", CompressionResult]:
     """
-    Apply structured pruning (remove entire neurons/channels).
+    Zero out entire output channels/neurons by L-n norm (structured MASKING).
 
-    Structured pruning removes entire output channels (for Conv2d) or
-    output neurons (for Linear layers). This directly reduces model
-    dimensions and provides real speedups without sparse hardware.
+    This selects whole output channels (Conv2d) or output neurons (Linear) and
+    sets them to zero. It does NOT change any tensor shape, so:
+      - parameter count is unchanged,
+      - FLOPs are unchanged (the dense GEMM still runs),
+      - file size does not shrink (and grows before prune.remove(), because the
+        mask plus weight_orig are both stored).
+
+    Structured pruning only becomes a real speedup after the zeroed channels are
+    physically removed and the surrounding layers are re-shaped to match — i.e.
+    rebuild the layers at the reduced width and copy the surviving channels
+    across, or use a dedicated tool (torch-pruning, NNI, TensorRT's
+    pruning-aware workflow). Treat this function as channel *selection*: it tells
+    you which channels to drop, and preserves accuracy measurement, but the cost
+    saving comes from the rebuild step.
     """
     import copy
     original_size = get_model_size_mb(model)
@@ -443,7 +541,7 @@ def prune_structured(
     compressed_size = get_model_size_mb(pruned_model)
 
     result = CompressionResult(
-        method="structured_pruning",
+        method="structured_pruning_mask",
         original_size_mb=round(original_size, 2),
         compressed_size_mb=round(compressed_size, 2),
         compression_ratio=round(original_size / max(compressed_size, 0.01), 2),
@@ -451,8 +549,10 @@ def prune_structured(
         compressed_params=count_nonzero_parameters(pruned_model),
         sparsity=round(actual_sparsity, 4),
         notes=(
-            f"Structured pruning at {sparsity:.0%} on {pruned_layers} layers. "
-            f"Directly reduces compute without sparse kernel support."
+            f"Zeroed {sparsity:.0%} of output channels on {pruned_layers} layer(s). "
+            f"Shapes unchanged: no FLOP or size reduction yet. Rebuild the layers "
+            f"at reduced width (torch-pruning / NNI / manual surgery) to realize "
+            f"the speedup."
         ),
     )
 
@@ -470,21 +570,28 @@ def iterative_pruning(
 
     Iterative pruning with fine-tuning between steps generally preserves
     accuracy much better than one-shot pruning at high sparsity levels.
+
+    IMPORTANT — why the schedule uses a CUMULATIVE amount:
+    `prune.global_unstructured(amount=x)` selects the x smallest-magnitude
+    weights out of ALL weights it is given, and already-zeroed weights are the
+    smallest. So calling it repeatedly with a per-step amount just re-selects the
+    same zeros: the model plateaus at the first step's sparsity (e.g. ~37%
+    instead of the requested 90%). The fix is to pass the cumulative target for
+    each step, which is also how PyTorch's own docs describe iterative pruning.
     """
     import copy
     results = []
     current_model = copy.deepcopy(model)
 
-    sparsity_per_step = 1.0 - (1.0 - target_sparsity) ** (1.0 / steps)
-
     for step in range(steps):
-        current_sparsity = calculate_sparsity(current_model)
-        step_target = 1.0 - (1.0 - current_sparsity) * (1.0 - sparsity_per_step)
+        # Cumulative (linear) schedule from target/steps up to target.
+        cumulative_target = target_sparsity * (step + 1) / steps
 
-        print(f"  Pruning step {step+1}/{steps}: target sparsity {step_target:.1%}")
+        print(f"  Pruning step {step+1}/{steps}: cumulative target sparsity "
+              f"{cumulative_target:.1%}")
 
         current_model, result = prune_magnitude_unstructured(
-            current_model, sparsity=sparsity_per_step, make_permanent=True,
+            current_model, sparsity=cumulative_target, make_permanent=True,
         )
         results.append(result)
 
@@ -492,6 +599,10 @@ def iterative_pruning(
         if finetune_fn is not None:
             print(f"  Fine-tuning after step {step+1}...")
             finetune_fn(current_model)
+
+    final_sparsity = calculate_sparsity(current_model)
+    print(f"  Final weight sparsity: {final_sparsity:.1%} "
+          f"(target {target_sparsity:.1%}; the gap is un-pruned biases/norm params)")
 
     return current_model, results
 
@@ -815,10 +926,22 @@ def run_demo():
     results = []
 
     # 1. Dynamic Quantization
+    # Quantized kernels need a backend engine (fbgemm on x86, qnnpack on ARM).
+    # If none is selected, torch raises "Didn't find engine ... NoQEngine".
+    if torch.backends.quantized.engine == "none":
+        engines = [e for e in torch.backends.quantized.supported_engines if e != "none"]
+        if engines:
+            torch.backends.quantized.engine = engines[0]
+            print(f"\n  Selected quantized backend engine: {engines[0]}")
+
     print("\n--- Dynamic Quantization ---")
-    q_model, q_result = quantize_dynamic(model)
-    print(format_compression_result(q_result))
-    results.append(q_result)
+    q_model = None
+    try:
+        q_model, q_result = quantize_dynamic(model)
+        print(format_compression_result(q_result))
+        results.append(q_result)
+    except RuntimeError as exc:
+        print(f"  SKIPPED: quantized kernels unavailable on this build ({exc}).")
 
     # 2. Unstructured Pruning at various sparsity levels
     for sparsity in [0.3, 0.5, 0.7, 0.9]:
@@ -827,19 +950,32 @@ def run_demo():
         print(format_compression_result(p_result))
         results.append(p_result)
 
-    # 3. Structured Pruning
-    print("\n--- Structured Pruning (30%) ---")
+    # 3. Structured Pruning (channel masking only -- see prune_structured docstring)
+    print("\n--- Structured Pruning / channel masking (30%) ---")
     sp_model, sp_result = prune_structured(model, sparsity=0.3)
     print(format_compression_result(sp_result))
     results.append(sp_result)
 
-    # 4. Benchmark: original vs quantized vs pruned
+    # 4. Iterative pruning to 90% (verifies the cumulative-schedule behaviour)
+    print("\n--- Iterative Pruning to 90% in 5 steps ---")
+    it_model, it_results = iterative_pruning(model, target_sparsity=0.9, steps=5)
+    print(format_compression_result(it_results[-1]))
+    results.append(it_results[-1])
+
+    # 5. Benchmark: original vs quantized (falls back to pruned if unavailable)
     print("\n--- Benchmarking ---")
-    comparison = compare_models(
-        model, q_model, sample_input,
-        original_name="Original FP32",
-        compressed_name="Dynamic INT8",
-    )
+    if q_model is not None:
+        comparison = compare_models(
+            model, q_model, sample_input,
+            original_name="Original FP32",
+            compressed_name="Dynamic INT8",
+        )
+    else:
+        comparison = compare_models(
+            model, it_model, sample_input,
+            original_name="Original FP32",
+            compressed_name="Pruned 90% (dense storage)",
+        )
     print(format_comparison(comparison))
 
     # 5. Summary table
@@ -897,6 +1033,8 @@ Examples:
                        choices=["dynamic", "static"],
                        help="Quantization method (default: dynamic)")
     quant.add_argument("--output", type=str, required=True, help="Output path for quantized model")
+    quant.add_argument("--arch", type=str, default="mlp", choices=ARCHS,
+                       help="Built-in demo architecture the state_dict belongs to (default: mlp)")
     quant.add_argument("--json", action="store_true", help="Output result as JSON")
 
     # Prune command
@@ -907,6 +1045,8 @@ Examples:
                      help="Pruning method (default: magnitude)")
     prn.add_argument("--sparsity", type=float, default=0.5, help="Target sparsity (default: 0.5)")
     prn.add_argument("--output", type=str, required=True, help="Output path for pruned model")
+    prn.add_argument("--arch", type=str, default="mlp", choices=ARCHS,
+                     help="Built-in demo architecture the state_dict belongs to (default: mlp)")
     prn.add_argument("--json", action="store_true", help="Output result as JSON")
 
     # Distill command
@@ -921,6 +1061,8 @@ Examples:
     # Benchmark command
     bench = subparsers.add_parser("benchmark", help="Benchmark model inference")
     bench.add_argument("--model", type=str, required=True, help="Path to model (.pt)")
+    bench.add_argument("--arch", type=str, default="mlp", choices=ARCHS,
+                       help="Built-in demo architecture the state_dict belongs to (default: mlp)")
     bench.add_argument("--batch-size", type=int, default=32, help="Batch size")
     bench.add_argument("--iterations", type=int, default=100, help="Benchmark iterations")
     bench.add_argument("--device", type=str, default="cpu", help="Device (cpu or cuda)")
@@ -930,6 +1072,8 @@ Examples:
     comp = subparsers.add_parser("compare", help="Compare original and compressed model")
     comp.add_argument("--original", type=str, required=True, help="Path to original model")
     comp.add_argument("--compressed", type=str, required=True, help="Path to compressed model")
+    comp.add_argument("--arch", type=str, default="mlp", choices=ARCHS,
+                      help="Built-in demo architecture both state_dicts belong to (default: mlp)")
     comp.add_argument("--batch-size", type=int, default=32, help="Batch size")
     comp.add_argument("--device", type=str, default="cpu", help="Device")
     comp.add_argument("--json", action="store_true", help="Output as JSON")
@@ -953,12 +1097,8 @@ def main():
         run_demo()
 
     elif args.command == "quantize":
-        print(f"  Loading model from {args.model}...")
-        # Load model -- expects a full model save or state dict
-        # For demonstration, we create a sample model and load weights
-        model = create_sample_model("mlp")
-        state_dict = torch.load(args.model, map_location="cpu", weights_only=True)
-        model.load_state_dict(state_dict)
+        print(f"  Loading '{args.arch}' state_dict from {args.model}...")
+        model = load_state_dict_into_arch(args.model, args.arch)
 
         if args.method == "dynamic":
             quantized, result = quantize_dynamic(model)
@@ -967,6 +1107,9 @@ def main():
 
         torch.save(quantized.state_dict(), args.output)
         print(f"  Quantized model saved to {args.output}")
+        print("  NOTE: this state_dict holds packed INT8 params. It cannot be "
+              "loaded back into the FP32 architecture, so `compare` cannot read "
+              "it; benchmark quantized models in-process via compare_models().")
 
         if args.json:
             print(json.dumps(result.to_dict(), indent=2))
@@ -974,10 +1117,8 @@ def main():
             print(format_compression_result(result))
 
     elif args.command == "prune":
-        print(f"  Loading model from {args.model}...")
-        model = create_sample_model("mlp")
-        state_dict = torch.load(args.model, map_location="cpu", weights_only=True)
-        model.load_state_dict(state_dict)
+        print(f"  Loading '{args.arch}' state_dict from {args.model}...")
+        model = load_state_dict_into_arch(args.model, args.arch)
 
         if args.method == "magnitude":
             pruned, result = prune_magnitude_unstructured(model, sparsity=args.sparsity)
@@ -1017,12 +1158,10 @@ def main():
         print("  - Combined loss with configurable weighting")
 
     elif args.command == "benchmark":
-        print(f"  Loading model from {args.model}...")
-        model = create_sample_model("mlp")
-        state_dict = torch.load(args.model, map_location="cpu", weights_only=True)
-        model.load_state_dict(state_dict)
+        print(f"  Loading '{args.arch}' state_dict from {args.model}...")
+        model = load_state_dict_into_arch(args.model, args.arch)
 
-        sample_input = create_sample_input("mlp", batch_size=args.batch_size)
+        sample_input = create_sample_input(args.arch, batch_size=args.batch_size)
         result = benchmark_model(
             model, sample_input,
             model_name=os.path.basename(args.model),
@@ -1036,19 +1175,13 @@ def main():
             print(format_benchmark_result(result))
 
     elif args.command == "compare":
-        print(f"  Loading original from {args.original}...")
-        original = create_sample_model("mlp")
-        original.load_state_dict(
-            torch.load(args.original, map_location="cpu", weights_only=True)
-        )
+        print(f"  Loading original ('{args.arch}') from {args.original}...")
+        original = load_state_dict_into_arch(args.original, args.arch)
 
-        print(f"  Loading compressed from {args.compressed}...")
-        compressed = create_sample_model("mlp")
-        compressed.load_state_dict(
-            torch.load(args.compressed, map_location="cpu", weights_only=True)
-        )
+        print(f"  Loading compressed ('{args.arch}') from {args.compressed}...")
+        compressed = load_state_dict_into_arch(args.compressed, args.arch)
 
-        sample_input = create_sample_input("mlp", batch_size=args.batch_size)
+        sample_input = create_sample_input(args.arch, batch_size=args.batch_size)
         comparison = compare_models(
             original, compressed, sample_input,
             original_name=os.path.basename(args.original),

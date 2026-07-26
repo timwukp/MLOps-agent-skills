@@ -59,26 +59,29 @@ client.set_model_version_tag(
     key="trained_by", value="ml-team"
 )
 
-# Transition stages
-client.transition_model_version_stage(
+# Promote with aliases (stages API is deprecated since MLflow 2.9)
+client.set_registered_model_alias(
     name="recommendation-model",
+    alias="staging",
     version=result.version,
-    stage="Staging"
 )
 
-# After validation passes
-client.transition_model_version_stage(
+# After validation passes — moving the alias automatically "demotes"
+# whichever version previously held it
+client.set_registered_model_alias(
     name="recommendation-model",
+    alias="champion",
     version=result.version,
-    stage="Production"
 )
 
-# Archive old production version
-client.transition_model_version_stage(
-    name="recommendation-model",
-    version=old_version,
-    stage="Archived"
+# Mark the old version as archived via a tag (aliases have no Archived state)
+client.set_model_version_tag(
+    name="recommendation-model", version=old_version,
+    key="status", value="archived",
 )
+
+# Load the current champion for serving
+model = mlflow.pyfunc.load_model("models:/recommendation-model@champion")
 ```
 
 ### 2. Model Versioning Strategy
@@ -86,7 +89,7 @@ client.transition_model_version_stage(
 ```python
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 def generate_model_version(model_path, config, metrics):
     """Generate a unique model version identifier."""
@@ -99,7 +102,7 @@ def generate_model_version(model_path, config, metrics):
         "minor": 1,     # New features (added features)
         "patch": 3,     # Bug fixes (retrained with same config)
         "hash": model_hash,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     return f"v{version_info['major']}.{version_info['minor']}.{version_info['patch']}-{model_hash}"
@@ -113,7 +116,8 @@ from mlflow.models.signature import infer_signature
 
 signature = infer_signature(X_train, model.predict(X_train))
 mlflow.sklearn.log_model(
-    model, "model",
+    model,
+    name="model",  # MLflow 3.x: use name= (positional artifact_path is deprecated)
     signature=signature,
     input_example=X_train[:5],
     registered_model_name="recommendation-model",
@@ -147,7 +151,7 @@ joblib.dump(model, "model.joblib")
 ### 4. Model Promotion Workflow
 
 ```python
-def promote_model(model_name, version, target_stage):
+def promote_model(model_name, version, target_alias="champion"):
     """Promote model with validation gates."""
     client = MlflowClient()
 
@@ -159,22 +163,24 @@ def promote_model(model_name, version, target_stage):
     if metrics.get("test_f1", 0) < 0.85:
         raise ValueError(f"F1 score {metrics['test_f1']} below threshold 0.85")
 
-    # Gate 2: Compare with current production
-    prod_versions = client.get_latest_versions(model_name, stages=["Production"])
-    if prod_versions:
-        prod_run = client.get_run(prod_versions[0].run_id)
+    # Gate 2: Compare with current champion (if one exists)
+    try:
+        champion = client.get_model_version_by_alias(model_name, target_alias)
+    except Exception:
+        champion = None
+    if champion:
+        prod_run = client.get_run(champion.run_id)
         prod_f1 = prod_run.data.metrics.get("test_f1", 0)
         if metrics["test_f1"] <= prod_f1:
-            raise ValueError(f"New model F1 {metrics['test_f1']} not better than production {prod_f1}")
+            raise ValueError(f"New model F1 {metrics['test_f1']} not better than champion {prod_f1}")
 
-    # Gate 3: Data validation tag
-    tags = {t.key: t.value for t in model_version.tags}
-    if tags.get("data_validated") != "true":
+    # Gate 3: Data validation tag (ModelVersion.tags is a plain dict)
+    if model_version.tags.get("data_validated") != "true":
         raise ValueError("Model data not validated")
 
-    # Promote
-    client.transition_model_version_stage(model_name, version, target_stage)
-    print(f"Model {model_name} v{version} promoted to {target_stage}")
+    # Promote — reassigning the alias replaces the previous holder
+    client.set_registered_model_alias(model_name, target_alias, version)
+    print(f"Model {model_name} v{version} promoted to @{target_alias}")
 ```
 
 ### 5. Model Lineage
@@ -245,25 +251,22 @@ def generate_model_card(model_name, version):
 
 ```python
 def rollback_model(model_name, target_version=None):
-    """Rollback to a previous model version."""
+    """Rollback the champion alias to a previous model version."""
     client = MlflowClient()
+    current = client.get_model_version_by_alias(model_name, "champion")
 
     if target_version is None:
-        # Find last archived production version
+        # Fall back to the most recent version before the current champion
         all_versions = client.search_model_versions(f"name='{model_name}'")
-        archived = [v for v in all_versions if v.current_stage == "Archived"]
-        if not archived:
-            raise ValueError("No archived versions available for rollback")
-        target_version = max(archived, key=lambda v: int(v.version)).version
+        candidates = [v for v in all_versions if int(v.version) < int(current.version)]
+        if not candidates:
+            raise ValueError("No earlier versions available for rollback")
+        target_version = max(candidates, key=lambda v: int(v.version)).version
 
-    # Demote current production
-    prod_versions = client.get_latest_versions(model_name, stages=["Production"])
-    for pv in prod_versions:
-        client.transition_model_version_stage(model_name, pv.version, "Archived")
-
-    # Promote rollback target
-    client.transition_model_version_stage(model_name, target_version, "Production")
-    print(f"Rolled back {model_name} to v{target_version}")
+    # Reassigning the alias atomically demotes the current champion
+    client.set_registered_model_alias(model_name, "champion", target_version)
+    client.set_model_version_tag(model_name, current.version, "status", "rolled_back")
+    print(f"Rolled back {model_name} champion to v{target_version}")
 ```
 
 ## Best Practices

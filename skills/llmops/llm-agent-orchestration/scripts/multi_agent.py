@@ -11,9 +11,11 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -52,7 +54,7 @@ class AgentConfig:
     name: str
     role: str
     system_prompt: str
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-5-mini"
     tools: List[str] = field(default_factory=list)
     can_delegate_to: List[str] = field(default_factory=list)
 
@@ -97,17 +99,24 @@ class AgentRunner:
     def __init__(self, config: AgentConfig, api_base: Optional[str] = None,
                  api_key: Optional[str] = None):
         self.config = config
-        self.api_base = api_base or os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        # OPENAI_BASE_URL is the openai>=1.0 variable (OPENAI_API_BASE was v0).
+        self.api_base = api_base or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or None
+        self._client = None
+
+    def _get_client(self):
+        """Create the client once; it is thread-safe and pools connections."""
+        if self._client is None:
+            try:
+                from openai import OpenAI
+            except ImportError:
+                logger.error("Install: pip install openai")
+                sys.exit(1)
+            self._client = OpenAI(base_url=self.api_base, api_key=self.api_key)
+        return self._client
 
     def invoke(self, task_content: str, context: str = "") -> str:
         """Send a task to the agent and return its textual response."""
-        try:
-            from openai import OpenAI
-        except ImportError:
-            logger.error("Install: pip install openai")
-            sys.exit(1)
-
         messages = [
             {"role": "system", "content": self.config.system_prompt},
         ]
@@ -115,11 +124,10 @@ class AgentRunner:
             messages.append({"role": "user", "content": f"Context from previous steps:\n{context}"})
         messages.append({"role": "user", "content": task_content})
 
-        client = OpenAI(base_url=self.api_base, api_key=self.api_key)
-        response = client.chat.completions.create(
+        response = self._get_client().chat.completions.create(
             model=self.config.model, messages=messages, temperature=0.3, max_tokens=1500,
         )
-        return response.choices[0].message.content.strip()
+        return (response.choices[0].message.content or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -196,33 +204,41 @@ class Orchestrator:
         return context
 
     # -- Parallel fan-out / fan-in ------------------------------------------
-    def run_parallel(self, task: str, agent_names: Optional[List[str]] = None) -> str:
-        """Fan-out: all agents work on the same task independently, then results are merged."""
+    def run_parallel(self, task: str, agent_names: Optional[List[str]] = None,
+                     max_workers: Optional[int] = None) -> str:
+        """Fan-out: all agents work on the same task concurrently, then results merge.
+
+        LLM calls are I/O-bound, so a thread pool gives real concurrency despite
+        the GIL: wall-clock time is that of the slowest agent, not their sum.
+        """
         self.trace.pattern = "parallel"
         self.trace.task = task
-        names = agent_names or list(self.agents.keys())
+        names = [n for n in (agent_names or list(self.agents.keys())) if n in self.runners]
         results: Dict[str, str] = {}
 
         for agent_name in names:
-            if agent_name not in self.runners:
-                continue
-            msg_in = Message(sender="orchestrator", receiver=agent_name,
-                             content=task, msg_type=MessageType.TASK)
-            self.trace.log_message(msg_in)
+            self.trace.log_message(Message(sender="orchestrator", receiver=agent_name,
+                                           content=task, msg_type=MessageType.TASK))
 
-            output = self.runners[agent_name].invoke(task)
-            results[agent_name] = output
-            self.trace.agent_outputs[agent_name] = output
+        with ThreadPoolExecutor(max_workers=max_workers or max(len(names), 1)) as pool:
+            futures = {pool.submit(self.runners[n].invoke, task): n for n in names}
+            for future in as_completed(futures):
+                agent_name = futures[future]
+                try:
+                    output = future.result()
+                except Exception as exc:
+                    logger.error(f"Agent '{agent_name}' failed: {exc}")
+                    output = f"[error: {type(exc).__name__}: {exc}]"
+                results[agent_name] = output
+                self.trace.agent_outputs[agent_name] = output
+                self.trace.log_message(Message(sender=agent_name, receiver="orchestrator",
+                                               content=output, msg_type=MessageType.RESULT))
 
-            msg_out = Message(sender=agent_name, receiver="orchestrator",
-                              content=output, msg_type=MessageType.RESULT)
-            self.trace.log_message(msg_out)
-
-        # Fan-in: combine results
+        # Fan-in: combine results in the requested order, not completion order.
         combined_parts = []
-        for name, result in results.items():
+        for name in names:
             role = self.agents[name].role
-            combined_parts.append(f"## {name} ({role})\n{result}")
+            combined_parts.append(f"## {name} ({role})\n{results.get(name, '')}")
         return "\n\n".join(combined_parts)
 
     # -- Hierarchical delegation -------------------------------------------
@@ -231,8 +247,17 @@ class Orchestrator:
         self.trace.pattern = "hierarchical"
         self.trace.task = task
 
-        # First agent is the manager by default
-        manager = manager_name or next(iter(self.agents))
+        # Default manager: the first agent that actually declares delegation
+        # targets. Falling back to "first agent in the dict" picked a worker in
+        # the default pipeline (researcher), where the reviewer is the manager.
+        if manager_name:
+            manager = manager_name
+        else:
+            manager = next((n for n, c in self.agents.items() if c.can_delegate_to),
+                           next(iter(self.agents)))
+            logger.info(f"No manager specified; using '{manager}'")
+        if manager not in self.agents:
+            raise ValueError(f"Manager '{manager}' not in agents: {list(self.agents)}")
         manager_config = self.agents[manager]
         worker_names = manager_config.can_delegate_to or [
             n for n in self.agents if n != manager
@@ -258,11 +283,16 @@ class Orchestrator:
         # Parse sub-tasks from JSON
         subtasks = self._parse_subtasks(plan_output, worker_names)
 
-        # Step 2: Workers execute their sub-tasks
-        worker_results: Dict[str, str] = {}
-        for item in subtasks:
+        # Step 2: Workers execute their sub-tasks. A worker can receive more than
+        # one sub-task, so results accumulate in a list per worker rather than
+        # overwriting the previous output.
+        worker_results: Dict[str, List[str]] = {}
+        for idx, item in enumerate(subtasks, 1):
             worker = item.get("worker", "")
             subtask = item.get("subtask", "")
+            if not subtask:
+                logger.warning(f"Sub-task {idx} has no 'subtask' text, skipping.")
+                continue
             if worker not in self.runners:
                 logger.warning(f"Worker '{worker}' not found, routing via keywords.")
                 worker = keyword_route(subtask, self.agents) or next(iter(worker_names), None)
@@ -274,8 +304,8 @@ class Orchestrator:
             self.trace.log_message(msg_del)
 
             output = self.runners[worker].invoke(subtask)
-            worker_results[worker] = output
-            self.trace.agent_outputs[worker] = output
+            worker_results.setdefault(worker, []).append(output)
+            self.trace.agent_outputs[f"{worker}_{len(worker_results[worker])}"] = output
 
             msg_res = Message(sender=worker, receiver=manager,
                               content=output, msg_type=MessageType.RESULT)
@@ -283,7 +313,9 @@ class Orchestrator:
 
         # Step 3: Manager synthesizes
         synthesis_context = "\n\n".join(
-            f"[{w}]: {r}" for w, r in worker_results.items()
+            f"[{w} #{i}]: {r}"
+            for w, outs in worker_results.items()
+            for i, r in enumerate(outs, 1)
         )
         synthesis_prompt = (
             f"You received these results from your workers. Synthesize them into a "
@@ -295,17 +327,33 @@ class Orchestrator:
 
     @staticmethod
     def _parse_subtasks(text: str, valid_workers: List[str]) -> List[Dict[str, str]]:
-        """Best-effort JSON extraction of sub-task assignments."""
-        import re
+        """Extract sub-task assignments from the manager's JSON plan.
+
+        Fails loudly instead of falling back to "give the whole raw plan to every
+        worker", which silently multiplied cost by len(workers) and produced
+        duplicated work that looked like a successful run.
+        """
         json_match = re.search(r"\[.*\]", text, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError:
-                pass
-        # Fallback: split evenly among workers
-        logger.warning("Could not parse manager plan as JSON; distributing task evenly.")
-        return [{"worker": w, "subtask": text} for w in valid_workers]
+        if not json_match:
+            raise ValueError(
+                "Manager plan contained no JSON array of sub-tasks. Raw output: "
+                f"{text[:300]!r}")
+        try:
+            plan = json.loads(json_match.group())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Manager plan is not valid JSON ({exc}). "
+                             f"Raw output: {text[:300]!r}") from exc
+        if not isinstance(plan, list):
+            raise ValueError(f"Manager plan must be a JSON list, got {type(plan).__name__}")
+        items = [it for it in plan if isinstance(it, dict) and it.get("subtask")]
+        if not items:
+            raise ValueError(f"Manager plan had no usable {{worker, subtask}} entries: "
+                             f"{text[:300]!r}")
+        unknown = {it.get("worker") for it in items} - set(valid_workers)
+        if unknown:
+            logger.warning(f"Plan references unknown workers {unknown}; "
+                           f"they will be keyword-routed.")
+        return items
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +385,7 @@ def load_config(config_path: str) -> List[AgentConfig]:
             name=item["name"],
             role=item.get("role", item["name"]),
             system_prompt=item.get("system_prompt", f"You are a {item.get('role', 'assistant')}."),
-            model=item.get("model", "gpt-4o-mini"),
+            model=item.get("model", "gpt-5-mini"),
             tools=item.get("tools", []),
             can_delegate_to=item.get("can_delegate_to", []),
         ))
@@ -404,14 +452,15 @@ def main():
     logger.info(f"Running pattern={args.pattern} with {len(agents)} agents")
 
     # Execute
-    if args.pattern == "sequential":
-        result = orchestrator.run_sequential(args.task)
-    elif args.pattern == "parallel":
-        result = orchestrator.run_parallel(args.task)
-    elif args.pattern == "hierarchical":
-        result = orchestrator.run_hierarchical(args.task)
-    else:
-        logger.error(f"Unknown pattern: {args.pattern}")
+    try:
+        if args.pattern == "sequential":
+            result = orchestrator.run_sequential(args.task)
+        elif args.pattern == "parallel":
+            result = orchestrator.run_parallel(args.task)
+        else:
+            result = orchestrator.run_hierarchical(args.task)
+    except ValueError as exc:
+        logger.error(f"Orchestration failed: {exc}")
         sys.exit(1)
 
     # Output

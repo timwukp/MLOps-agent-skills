@@ -54,15 +54,15 @@ Data Ingestion -> Data Validation -> Feature Engineering -> Data Splitting
 | **Sensor** | Waits for external conditions (new data in S3, model registry update) |
 | **XCom** | Passes small metadata between tasks (metrics, file paths, model URIs) |
 | **Connection** | Stores credentials for external systems |
-| **Dataset** | (Airflow 2.4+) Enables data-aware scheduling |
+| **Asset** (`Dataset` in 2.4-2.x) | Enables data-aware scheduling. Airflow 3.x renamed `Dataset` to `Asset` (`airflow.sdk.Asset`); `Dataset` remains as a deprecated alias |
 
 ### 2.2 DAG Definition Best Practices
 
 ```python
+from datetime import datetime, timedelta
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.utils.dates import days_ago
-from datetime import timedelta
 
 default_args = {
     "owner": "ml-team",
@@ -80,8 +80,11 @@ with DAG(
     dag_id="ml_training_pipeline",
     default_args=default_args,
     description="End-to-end ML training pipeline",
-    schedule_interval="0 2 * * *",  # Daily at 2 AM
-    start_date=days_ago(1),
+    # Airflow 3.x: `schedule_interval` was removed — use `schedule`.
+    schedule="0 2 * * *",  # Daily at 2 AM
+    # Airflow 3.x: `airflow.utils.dates.days_ago` was removed, and a relative
+    # start_date makes the first run window shift on every DAG parse. Pin it.
+    start_date=datetime(2025, 1, 1),
     catchup=False,
     max_active_runs=1,
     tags=["ml", "training", "production"],
@@ -106,7 +109,10 @@ train_task = PythonOperator(
 )
 
 # KubernetesPodOperator - for GPU training or isolated environments
-from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator
+# Airflow 3.x / cncf.kubernetes provider 5+: the module is
+# ...operators.pod (the old ...operators.kubernetes_pod path was removed).
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from kubernetes.client import models as k8s
 
 gpu_train = KubernetesPodOperator(
     task_id="gpu_training",
@@ -114,11 +120,15 @@ gpu_train = KubernetesPodOperator(
     namespace="ml-workloads",
     image="ml-training:latest",
     arguments=["--epochs", "100", "--lr", "0.001"],
-    resources={
-        "requests": {"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"},
-        "limits": {"cpu": "8", "memory": "32Gi", "nvidia.com/gpu": "1"},
-    },
-    is_delete_operator_pod=True,
+    # Airflow 3.x: the `resources={...}` dict was removed. Pass a typed
+    # V1ResourceRequirements via container_resources.
+    container_resources=k8s.V1ResourceRequirements(
+        requests={"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"},
+        limits={"cpu": "8", "memory": "32Gi", "nvidia.com/gpu": "1"},
+    ),
+    # Airflow 3.x: `is_delete_operator_pod` was replaced by on_finish_action
+    # ("delete_pod" | "delete_succeeded_pod" | "keep_pod").
+    on_finish_action="delete_pod",
     get_logs=True,
 )
 
@@ -148,7 +158,13 @@ def evaluate_model_fn(**context):
     model_uri = metrics["model_uri"]
 ```
 
-**XCom size limits:** Default backend stores in the metadata DB (~48KB). For larger payloads, use a custom XCom backend backed by S3/GCS.
+**XCom size limits:** There is no fixed Airflow-level cap — the default backend
+serializes the value into a single metadata-DB column, so the ceiling is whatever
+your database allows: MySQL `BLOB` is ~64 KB (65,535 bytes), PostgreSQL `bytea`
+is up to ~1 GB, SQLite is effectively unbounded. Practically, keep XComs to a few
+KB regardless: every pull is a DB round-trip, and the scheduler reads them too.
+For anything larger, write to S3/GCS and pass the URI, or configure a custom XCom
+backend that offloads the payload to object storage.
 
 See `scripts/airflow_pipeline.py` for a complete, executable Airflow DAG.
 
@@ -184,10 +200,13 @@ For detailed framework-specific guides (Kubeflow, Prefect, Dagster, ZenML), see 
 ### 4.2 Event-Driven Scheduling
 
 ```python
-# Airflow - Dataset-aware scheduling (Airflow 2.4+)
-from airflow.datasets import Dataset
+# Airflow - asset-aware scheduling.
+# Airflow 3.x: Dataset was renamed to Asset (airflow.sdk.Asset). On 2.4-2.x use
+# `from airflow.datasets import Dataset`; the Dataset name still resolves in 3.x
+# as a deprecated alias.
+from airflow.sdk import Asset
 
-data_landing = Dataset("s3://ml-data/incoming/")
+data_landing = Asset("s3://ml-data/incoming/")
 
 # Producer DAG
 with DAG("data_producer", ...):
@@ -197,7 +216,7 @@ with DAG("data_producer", ...):
         outlets=[data_landing],
     )
 
-# Consumer DAG - triggered when dataset is updated
+# Consumer DAG - triggered when the asset is updated
 with DAG("training_pipeline", schedule=[data_landing], ...):
     pass
 ```
@@ -207,7 +226,7 @@ with DAG("training_pipeline", schedule=[data_landing], ...):
 Combine strategies: run on a cron schedule but skip if no new data.
 
 ```python
-with DAG("smart_training", schedule_interval="0 */4 * * *", ...):
+with DAG("smart_training", schedule="0 */4 * * *", ...):   # Airflow 3.x: schedule=
     check = ShortCircuitOperator(
         task_id="check_data",
         python_callable=check_new_data,
@@ -261,7 +280,9 @@ with DAG("ensemble_training", ...):
 
 ```python
 # Airflow - TriggerDagRunOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+# Airflow 3.x: core operators moved to the standard provider —
+# airflow.providers.standard.operators.trigger_dagrun
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 trigger_deployment = TriggerDagRunOperator(
     task_id="trigger_deployment",
@@ -374,28 +395,62 @@ For comprehensive testing strategies (integration, contract, performance tests),
 
 ### 8.2 Alerting Rules
 
+Airflow emits metrics over **StatsD**, not natively over Prometheus, and the
+metric names are dotted with the `dag_id` embedded in the name (not as a label).
+The relevant emitters are:
+
+| StatsD metric | Type | Meaning |
+|---------------|------|---------|
+| `dagrun.duration.success.<dag_id>` | timer | Duration of successful DAG runs |
+| `dagrun.duration.failed.<dag_id>` | timer | Duration of failed DAG runs |
+| `dagrun.<dag_id>.first_task_scheduling_delay` | timer | Scheduling latency |
+| `ti.finish.<dag_id>.<task_id>.<state>` | counter | Task instance terminal state |
+| `ti.start.<dag_id>.<task_id>` | counter | Task instance starts |
+
+To alert in Prometheus, run `statsd_exporter` in front of Airflow and use a
+mapping that lifts `dag_id` out of the name into a label. With the mapping below,
+`dagrun.duration.failed.training_pipeline` becomes
+`airflow_dagrun_duration_failed{dag_id="training_pipeline"}`:
+
 ```yaml
-# Prometheus alerting rules
+# statsd_exporter mapping
+mappings:
+  - match: "airflow.dagrun.duration.*.*"
+    name: "airflow_dagrun_duration_${1}"
+    labels: { dag_id: "$2" }
+  - match: "airflow.ti.finish.*.*.*"
+    name: "airflow_ti_finish"
+    labels: { dag_id: "$1", task_id: "$2", state: "$3" }
+```
+
+```yaml
+# Prometheus alerting rules (names produced by the mapping above)
 groups:
   - name: ml_pipeline_alerts
     rules:
       - alert: PipelineFailureRate
         expr: |
-          rate(airflow_dag_run_duration_failed_total{dag_id="training_pipeline"}[1h])
-          / rate(airflow_dag_run_duration_total{dag_id="training_pipeline"}[1h]) > 0.3
+          sum(rate(airflow_ti_finish{dag_id="training_pipeline", state="failed"}[1h]))
+          /
+          sum(rate(airflow_ti_finish{dag_id="training_pipeline"}[1h])) > 0.3
         for: 10m
         labels:
           severity: critical
         annotations:
-          summary: "Training pipeline failure rate > 30%"
+          summary: "Training pipeline task failure rate > 30%"
 
-      - alert: PipelineSLAMiss
+      - alert: PipelineRunTooSlow
         expr: |
-          airflow_dag_run_duration_seconds{dag_id="training_pipeline", state="running"} > 7200
+          airflow_dagrun_duration_success{dag_id="training_pipeline", quantile="0.9"} > 7200
         for: 5m
         labels:
           severity: warning
+        annotations:
+          summary: "Training pipeline P90 runtime exceeds 2 hours"
 ```
+
+Verify metric names against your Airflow version before shipping alerts —
+`airflow config list --section metrics` shows the prefix and any renames in effect.
 
 ---
 

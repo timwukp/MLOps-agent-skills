@@ -100,22 +100,21 @@ def ks_drift_test(reference, current, significance=0.05):
 
 ```python
 def chi2_drift_test(reference, current, significance=0.05):
-    """Chi-squared test for categorical feature drift."""
+    """Chi-squared test for categorical feature drift.
+
+    Build a 2xk contingency table (reference vs current counts per category)
+    and use chi2_contingency, which computes expected counts internally.
+    Note: stats.chisquare requires observed and expected sums to match, so it
+    raises ValueError when a category is missing from one sample.
+    """
     # Get all categories
-    categories = set(reference.unique()) | set(current.unique())
+    categories = list(set(reference.unique()) | set(current.unique()))
 
     ref_counts = reference.value_counts().reindex(categories, fill_value=0)
     cur_counts = current.value_counts().reindex(categories, fill_value=0)
 
-    # Normalize
-    ref_freq = ref_counts / ref_counts.sum()
-    cur_freq = cur_counts / cur_counts.sum()
-
-    # Expected counts based on reference distribution
-    expected = ref_freq * cur_counts.sum()
-    expected = expected.clip(lower=1)  # Avoid zero expected
-
-    statistic, p_value = stats.chisquare(cur_counts, f_exp=expected)
+    table = np.array([ref_counts.to_numpy(), cur_counts.to_numpy()])
+    statistic, p_value, dof, expected = stats.chi2_contingency(table)
     return {
         "test": "chi2",
         "statistic": statistic,
@@ -127,40 +126,44 @@ def chi2_drift_test(reference, current, significance=0.05):
 ### 4. Evidently Drift Detection
 
 ```python
-from evidently.report import Report
-from evidently.metric_preset import DataDriftPreset
-from evidently.metrics import (
-    ColumnDriftMetric, DatasetDriftMetric, DataDriftTable
+# Evidently 0.7+ API (the pre-0.7 evidently.report / metric_preset modules are removed)
+from evidently import Report, Dataset, DataDefinition
+from evidently.presets import DataDriftPreset
+
+# Wrap dataframes with a data definition (replaces ColumnMapping)
+definition = DataDefinition(
+    numerical_columns=["age", "income"],
+    categorical_columns=["segment"],
 )
+ref_data = Dataset.from_pandas(ref_df, data_definition=definition)
+cur_data = Dataset.from_pandas(cur_df, data_definition=definition)
 
-# Quick drift report
-report = Report(metrics=[DataDriftPreset()])
-report.run(reference_data=ref_df, current_data=cur_df)
+# Quick drift report; run() returns a snapshot
+report = Report([DataDriftPreset()])
+snapshot = report.run(cur_data, ref_data)
+snapshot.save_html("drift_report.html")
 
-# Custom drift configuration
-from evidently.metrics import DataDriftTable
-report = Report(metrics=[
-    DataDriftTable(
-        num_stattest="ks",           # KS test for numerical
-        cat_stattest="chisquare",    # Chi-squared for categorical
-        num_stattest_threshold=0.05,
-        cat_stattest_threshold=0.05,
+# Custom drift configuration (per-type stat tests and thresholds)
+report = Report([
+    DataDriftPreset(
+        num_method="ks",             # KS test for numerical
+        cat_method="chisquare",      # Chi-squared for categorical
+        num_threshold=0.05,
+        cat_threshold=0.05,
     ),
 ])
-report.run(reference_data=ref_df, current_data=cur_df)
-result = report.as_dict()
+snapshot = report.run(cur_data, ref_data)
+result = snapshot.dict()
 
-# Extract per-feature drift results
-drift_results = result["metrics"][0]["result"]
-drifted_columns = [
-    col for col, info in drift_results["drift_by_columns"].items()
-    if info["drift_detected"]
-]
+# Add pass/fail tests to the same report (TestSuite is merged into Report)
+report = Report([DataDriftPreset()], include_tests=True)
+snapshot = report.run(cur_data, ref_data)
 ```
 
 ### 5. Multivariate Drift (Domain Classifier)
 
 ```python
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import cross_val_score
 
@@ -195,6 +198,8 @@ def domain_classifier_drift(reference, current, threshold=0.55):
 ### 6. Comprehensive Drift Detection Pipeline
 
 ```python
+from datetime import datetime, timezone
+
 class DriftDetector:
     def __init__(self, reference_data, config):
         self.reference = reference_data
@@ -203,7 +208,7 @@ class DriftDetector:
 
     def detect(self, current_data):
         """Run all configured drift tests."""
-        results = {"timestamp": datetime.utcnow(), "features": {}}
+        results = {"timestamp": datetime.now(timezone.utc), "features": {}}
 
         for col in self.config["features"]:
             feature_type = self.config["features"][col]["type"]

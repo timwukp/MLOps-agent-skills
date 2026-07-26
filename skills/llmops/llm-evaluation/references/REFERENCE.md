@@ -70,7 +70,7 @@ Score the response on faithfulness (1-5) and completeness (1-5).
 **Cons**: Requires curated reference answers, expensive to create gold data.
 
 ### Best Practices for LLM-as-Judge
-- Use the strongest available model as the judge (GPT-4o, Claude Sonnet/Opus)
+- Use the strongest available model as the judge (GPT-5, claude-opus-5, claude-sonnet-5)
 - Always randomize order in pairwise comparisons to counter position bias
 - Include explicit rubrics with concrete examples for each score level
 - Run evaluations multiple times (n=3-5) and take the majority vote or average
@@ -132,7 +132,7 @@ Score the response on faithfulness (1-5) and completeness (1-5).
 | Approach | Tool/Model | Strengths | Weaknesses |
 |----------|-----------|-----------|------------|
 | Classifier-based | Perspective API, OpenAI Moderation | Fast, consistent | Limited to trained categories |
-| LLM-as-judge | GPT-4, Claude | Nuanced, context-aware | Expensive, variable |
+| LLM-as-judge | GPT-5, Claude (claude-sonnet-5) | Nuanced, context-aware | Expensive, variable |
 | Regex/keyword | Custom rules | Fast, deterministic | Easily bypassed, high false positives |
 
 ### Bias Evaluation
@@ -167,7 +167,7 @@ Score the response on faithfulness (1-5) and completeness (1-5).
 
 1. **Evaluating only on easy examples**: This inflates quality perception. Include hard cases.
 2. **Using the same model as judge and candidate**: Self-evaluation is biased. Use a stronger or different model family.
-3. **Ignoring evaluation cost**: Running GPT-4 as a judge on thousands of examples is expensive. Budget for it or use cheaper proxy metrics for fast iteration.
+3. **Ignoring evaluation cost**: Running a frontier judge (GPT-5, claude-opus-5) on thousands of examples is expensive. Budget for it or use cheaper proxy metrics for fast iteration.
 4. **Optimizing for benchmarks over real use cases**: Benchmark scores can diverge from user satisfaction.
 5. **One-time evaluation**: Evaluation should be continuous, not a one-off gate.
 6. **Averaging across dissimilar tasks**: Report per-category scores, not just overall averages.
@@ -183,7 +183,7 @@ LLM outputs are stochastic. A 2% improvement on 50 test examples is likely noise
 |----------|------|----------------|
 | Comparing accuracy (binary) | McNemar's test | `statsmodels.stats.contingency_tables` |
 | Comparing mean scores | Paired t-test or Wilcoxon signed-rank | `scipy.stats.ttest_rel` or `scipy.stats.wilcoxon` |
-| Comparing win rates | Binomial test | `scipy.stats.binom_test` |
+| Comparing win rates | Binomial test | `scipy.stats.binomtest` (`binom_test` removed in SciPy 1.12) |
 | Multiple model comparison | Bootstrap confidence intervals | Resample and compute intervals |
 
 ### Sample Size Guidelines

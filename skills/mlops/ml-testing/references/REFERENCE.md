@@ -129,20 +129,46 @@ def test_model_prediction_range():
 ```
 
 **Great Expectations (data validation)**:
+
+GX 1.0 removed the `context.sources` namespace and the ad-hoc `validator` flow.
+The current API is `context.data_sources`, and validation runs through an
+ExpectationSuite plus a ValidationDefinition (or a Checkpoint):
+
 ```python
 import great_expectations as gx
+import great_expectations.expectations as gxe
+import pandas as pd
 
 context = gx.get_context()
-validator = context.sources.pandas_default.read_csv("features.csv")
 
-validator.expect_column_to_exist("user_age")
-validator.expect_column_values_to_be_between("user_age", min_value=0, max_value=150)
-validator.expect_column_values_to_not_be_null("user_id")
-validator.expect_column_mean_to_be_between("purchase_amount", min_value=10, max_value=500)
-validator.expect_table_row_count_to_be_between(min_value=1000, max_value=10_000_000)
+# 1. Data source -> data asset -> batch definition
+data_source = context.data_sources.add_pandas("features_source")
+asset = data_source.add_dataframe_asset(name="features")
+batch_definition = asset.add_batch_definition_whole_dataframe("all_rows")
 
-results = validator.validate()
-assert results.success, f"Data validation failed: {results}"
+# 2. Expectation suite
+suite = context.suites.add(gx.ExpectationSuite(name="feature_checks"))
+suite.add_expectation(gxe.ExpectColumnToExist(column="user_age"))
+suite.add_expectation(gxe.ExpectColumnValuesToBeBetween(
+    column="user_age", min_value=0, max_value=150))
+suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="user_id"))
+suite.add_expectation(gxe.ExpectColumnMeanToBeBetween(
+    column="purchase_amount", min_value=10, max_value=500))
+suite.add_expectation(gxe.ExpectTableRowCountToBeBetween(
+    min_value=1000, max_value=10_000_000))
+
+# 3. Validation definition -> run
+validation_definition = context.validation_definitions.add(
+    gx.ValidationDefinition(
+        name="feature_validation", data=batch_definition, suite=suite,
+    )
+)
+df = pd.read_csv("features.csv")
+result = validation_definition.run(batch_parameters={"dataframe": df})
+assert result.success, f"Data validation failed: {result}"
+
+# For scheduled runs, wrap one or more validation definitions in a Checkpoint
+# (context.checkpoints.add) so actions such as result stores and alerts fire.
 ```
 
 **Deepchecks (model validation)**:
@@ -250,18 +276,24 @@ class TestModelBehavior:
     @pytest.mark.parametrize("name_a,name_b", [
         ("John", "Maria"), ("David", "Wei"), ("Sarah", "Aisha"),
     ])
+    def _positive_score(self, model, text):
+        """predict_proba returns a 2-D array; reduce to one scalar per input."""
+        return float(model.predict_proba([text])[0, 1])
+
     def test_name_invariance(self, model, name_a, name_b):
         """INV: Sentiment should not depend on person's name."""
         template = "{name} said the food was delicious."
-        pred_a = model.predict_proba(template.format(name=name_a))
-        pred_b = model.predict_proba(template.format(name=name_b))
+        pred_a = self._positive_score(model, template.format(name=name_a))
+        pred_b = self._positive_score(model, template.format(name=name_b))
+        # Comparing raw predict_proba arrays with abs(...) < x would raise
+        # "truth value of an array is ambiguous".
         assert abs(pred_a - pred_b) < 0.05
 
     def test_negative_addition_directional(self, model):
         """DIR: Adding negative text should decrease sentiment score."""
         base = "The hotel room was clean."
         modified = "The hotel room was clean. But the service was awful."
-        assert model.predict_proba(modified) < model.predict_proba(base)
+        assert self._positive_score(model, modified) < self._positive_score(model, base)
 ```
 
 ---

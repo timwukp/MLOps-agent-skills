@@ -4,7 +4,7 @@
 
 | Feature | LangGraph | CrewAI | AutoGen | Semantic Kernel | Haystack |
 |---|---|---|---|---|---|
-| **License** | MIT | MIT | MIT (Creative Commons) | MIT | Apache 2.0 |
+| **License** | MIT | MIT | MIT | MIT | Apache 2.0 |
 | **Language** | Python, JS | Python | Python, .NET | Python, C#, Java | Python |
 | **Architecture** | Graph-based state machine | Role-based crew | Conversational agents | Plugin-based kernel | Pipeline-based |
 | **Multi-Agent** | Yes (native) | Yes (primary focus) | Yes (primary focus) | Yes (via planners) | Limited |
@@ -23,13 +23,14 @@
 
 ```python
 # ReAct loop: Think -> Act -> Observe -> Repeat
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
+# langgraph.prebuilt.create_react_agent is deprecated as of LangGraph 1.x;
+# langchain.agents.create_agent is the supported entry point. It accepts a model
+# string ("provider:model"), middleware, and a checkpointer.
+from langchain.agents import create_agent
 
-llm = ChatOpenAI(model="gpt-4o")
 tools = [search_tool, calculator_tool, lookup_tool]
 
-agent = create_react_agent(llm, tools)
+agent = create_agent("openai:gpt-5-mini", tools=tools)
 
 result = agent.invoke({
     "messages": [{"role": "user", "content": "What is the GDP per capita of the country with the tallest building?"}]
@@ -131,35 +132,58 @@ tools = [
 ]
 
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5-mini",
     messages=messages,
     tools=tools,
     tool_choice="auto"
 )
 ```
 
-### Code Execution (Sandboxed)
+### Code Execution (NOT a sandbox without real isolation)
+
+A subprocess is a blast-radius limiter, not a security boundary. Overriding `env`
+restricts what the child can find on `PATH`; it does nothing about filesystem
+access, network access, CPU/memory consumption, or `os.system` on absolute paths.
+The same applies to `eval`/`exec` with `__builtins__` stripped and a blocklist of
+forbidden substrings: `__import__`, `getattr`, `object.__subclasses__()` and
+base64-decoded source all walk straight through it.
+
+Treat the snippet below as "run trusted code out-of-process with a timeout". For
+model-generated or user-supplied code you need actual isolation:
+
+- a container with `--network=none`, read-only rootfs, dropped capabilities, a
+  non-root user and cpu/memory limits (gVisor or Firecracker for a stronger
+  kernel boundary), or
+- a hosted code-interpreter sandbox (E2B, Modal, Daytona) or the model
+  provider's own code-execution tool.
 
 ```python
-# Safe code execution for agent tool use
+# Run trusted Python out-of-process with a timeout. NOT a security sandbox.
 import subprocess
+import sys
 import tempfile
+from pathlib import Path
 
 def execute_python_code(code: str, timeout: int = 30) -> str:
-    """Execute Python code in an isolated subprocess."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(code)
-        f.flush()
+    # A TemporaryDirectory cleans itself up; NamedTemporaryFile(delete=False)
+    # leaks a file per call. sys.executable guarantees the same interpreter
+    # (and virtualenv) rather than whatever "python" resolves to.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script = Path(tmpdir) / "snippet.py"
+        script.write_text(code, encoding="utf-8")
         try:
             result = subprocess.run(
-                ["python", f.name],
-                capture_output=True, text=True, timeout=timeout,
-                env={"PATH": "/usr/bin"}  # Restricted environment
+                [sys.executable, "-I", str(script)],   # -I: isolated mode
+                capture_output=True, text=True, timeout=timeout, cwd=tmpdir,
             )
-            return result.stdout if result.returncode == 0 else result.stderr
         except subprocess.TimeoutExpired:
             return "Error: Code execution timed out"
+    return result.stdout if result.returncode == 0 else result.stderr
 ```
+
+For arithmetic-only tools, skip code execution entirely and walk the AST with a
+whitelist of node types and functions - see `safe_eval_arithmetic` in
+`scripts/build_agent.py`.
 
 ### API Integration Best Practices
 
@@ -282,29 +306,40 @@ class EpisodicMemory:
 
 ## Human-in-the-Loop Patterns
 
+The current idiom is the `interrupt()` function called from inside a node, resumed
+with `Command(resume=...)`. It carries a payload to the human and returns their
+answer at the exact point execution paused. Compile-time `interrupt_before=[...]`
+still works but is the legacy, node-granular form: it cannot pass a payload or
+receive a value back.
+
 ```python
-# LangGraph human-in-the-loop with interrupt
+# LangGraph human-in-the-loop with interrupt()
 from langgraph.graph import StateGraph
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.memory import InMemorySaver   # successor to MemorySaver
+
+def sensitive_action(state: AgentState):
+    decision = interrupt({
+        "question": "Approve this action?",
+        "action": state["pending_action"],
+    })
+    if decision != "approve":
+        return {"messages": [{"role": "assistant", "content": "Cancelled by human."}]}
+    return sensitive_tool(state)
 
 graph = StateGraph(AgentState)
-# ... define nodes ...
+graph.add_node("sensitive_action", sensitive_action)
+# ... define the rest of the nodes/edges ...
 
-# Add interrupt before sensitive actions
-graph.add_node("sensitive_action", sensitive_tool)
+# A checkpointer is REQUIRED for interrupts - it stores the paused state.
+app = graph.compile(checkpointer=InMemorySaver())
+config = {"configurable": {"thread_id": "t1"}}
 
-checkpointer = MemorySaver()
-app = graph.compile(
-    checkpointer=checkpointer,
-    interrupt_before=["sensitive_action"]  # Pause here for approval
-)
+result = app.invoke(input, config=config)
+print(result["__interrupt__"])          # payload shown to the human
 
-# First run - pauses at interrupt
-result = app.invoke(input, config={"configurable": {"thread_id": "t1"}})
-
-# Human reviews and approves
-# Resume execution
-result = app.invoke(None, config={"configurable": {"thread_id": "t1"}})
+# Resume with the human's answer
+result = app.invoke(Command(resume="approve"), config=config)
 ```
 
 ### When to Use Human-in-the-Loop

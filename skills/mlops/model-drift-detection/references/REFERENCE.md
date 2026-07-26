@@ -76,7 +76,7 @@ statistic, p_value = ks_2samp(reference_data, production_data)
 ```
 - Non-parametric; no distributional assumptions.
 - Sensitive to changes in location, scale, and shape.
-- Less powerful for large samples (nearly everything becomes significant).
+- Overly sensitive for large samples (tiny, practically irrelevant differences become statistically significant).
 - Only works on univariate data.
 
 **Chi-Squared Test**:
@@ -200,14 +200,18 @@ When monitoring many features simultaneously, raw p-values produce excessive fal
 
 ### Quick Start Examples
 
-**Evidently**:
+**Evidently** (0.7+ API):
 ```python
-from evidently.report import Report
-from evidently.metric_preset import DataDriftPreset
+from evidently import Report, Dataset, DataDefinition
+from evidently.presets import DataDriftPreset
 
-report = Report(metrics=[DataDriftPreset()])
-report.run(reference_data=ref_df, current_data=prod_df)
-report.save_html("drift_report.html")
+definition = DataDefinition(numerical_columns=["age"], categorical_columns=["segment"])
+ref_data = Dataset.from_pandas(ref_df, data_definition=definition)
+prod_data = Dataset.from_pandas(prod_df, data_definition=definition)
+
+report = Report([DataDriftPreset()])
+snapshot = report.run(prod_data, ref_data)
+snapshot.save_html("drift_report.html")
 ```
 
 **Alibi Detect**:

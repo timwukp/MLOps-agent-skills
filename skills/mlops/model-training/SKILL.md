@@ -87,7 +87,7 @@ def train_from_config(config_path):
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler  # torch.cuda.amp is deprecated
 
 def train_pytorch(model, train_loader, val_loader, config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -98,10 +98,12 @@ def train_pytorch(model, train_loader, val_loader, config):
         lr=config["learning_rate"],
         weight_decay=config.get("weight_decay", 0.01),
     )
+    # T_max is in scheduler.step() calls; we step once per epoch below,
+    # so size it in epochs (use epochs * len(train_loader) only if stepping per batch)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config["epochs"] * len(train_loader)
+        optimizer, T_max=config["epochs"]
     )
-    scaler = GradScaler()  # Mixed precision
+    scaler = GradScaler("cuda")  # Mixed precision
     criterion = nn.CrossEntropyLoss()
 
     best_val_loss = float("inf")
@@ -115,7 +117,7 @@ def train_pytorch(model, train_loader, val_loader, config):
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
 
-            with autocast():  # Mixed precision forward pass
+            with autocast("cuda"):  # Mixed precision forward pass
                 output = model(X)
                 loss = criterion(output, y)
 
@@ -133,7 +135,7 @@ def train_pytorch(model, train_loader, val_loader, config):
         with torch.no_grad():
             for X, y in val_loader:
                 X, y = X.to(device), y.to(device)
-                with autocast():
+                with autocast("cuda"):
                     output = model(X)
                     val_loss += criterion(output, y).item()
 
@@ -175,6 +177,10 @@ def objective(trial):
     return scores.mean()
 
 # Run optimization
+# Note: MedianPruner only takes effect if the objective calls
+# trial.report(value, step) + trial.should_prune() during training
+# (e.g. per epoch/fold). With a single cross_val_score return like
+# above, nothing is ever pruned — omit the pruner or report steps.
 study = optuna.create_study(
     direction="maximize",
     sampler=optuna.samplers.TPESampler(seed=42),
@@ -189,30 +195,38 @@ print(f"Best F1: {study.best_value:.4f}")
 ### 4. Distributed Training (PyTorch DDP)
 
 ```python
+import os
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-def setup_ddp(rank, world_size):
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+def setup_ddp():
+    # torchrun sets RANK/WORLD_SIZE/LOCAL_RANK env vars; init from them
+    dist.init_process_group("nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank
 
-def train_ddp(rank, world_size, model, dataset, config):
-    setup_ddp(rank, world_size)
+def train_ddp(model, dataset, config):
+    local_rank = setup_ddp()
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
 
-    model = model.to(rank)
-    model = DDP(model, device_ids=[rank])
+    model = model.to(local_rank)
+    model = DDP(model, device_ids=[local_rank])
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     loader = DataLoader(dataset, batch_size=config["batch_size"], sampler=sampler)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
+    criterion = nn.CrossEntropyLoss()
 
     for epoch in range(config["epochs"]):
         sampler.set_epoch(epoch)
         for X, y in loader:
-            X, y = X.to(rank), y.to(rank)
-            loss = model(X, y)
+            X, y = X.to(local_rank), y.to(local_rank)
+            output = model(X)
+            loss = criterion(output, y)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -294,9 +308,10 @@ lgb_model = lgb.LGBMClassifier(
 # Gradient accumulation (simulate larger batch size)
 accumulation_steps = 4
 for i, (X, y) in enumerate(loader):
-    loss = model(X, y) / accumulation_steps
+    loss = criterion(model(X), y) / accumulation_steps
     loss.backward()
-    if (i + 1) % accumulation_steps == 0:
+    # Final-batch flush: also step when the loader ends mid-accumulation
+    if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
         optimizer.step()
         optimizer.zero_grad()
 

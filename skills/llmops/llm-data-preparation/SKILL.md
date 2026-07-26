@@ -23,6 +23,8 @@ High-quality training data is the most important factor in LLM fine-tuning succe
 This skill covers creating, curating, and validating datasets for instruction tuning,
 alignment, and domain adaptation.
 
+Tested with: `argilla>=2`, `datasketch>=1.6`, `datasets>=3`, `openai>=1.0`.
+
 ## When to Use This Skill
 
 - Creating instruction-following datasets
@@ -46,11 +48,12 @@ Raw Sources → Clean → Format → Annotate → Validate → Deduplicate → S
 ### 1. Synthetic Data Generation
 
 ```python
+import json
 from openai import OpenAI
 
 client = OpenAI()
 
-def generate_instruction_data(topic, num_examples=100, model="gpt-4o"):
+def generate_instruction_data(topic, num_examples=100, model="gpt-5-mini"):
     """Generate synthetic instruction-response pairs."""
     examples = []
 
@@ -63,8 +66,11 @@ Vary the difficulty, style, and type of instruction (explain, compare, analyze, 
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
+                # json_object mode requires a top-level OBJECT, so ask for an
+                # object with a "pairs" key. Requesting a bare JSON array here
+                # would make the model fight the response format.
                 {"role": "user", "content": f"""Generate 10 instruction-response pairs about {topic}.
-Return as JSON array: [{{"instruction": "...", "response": "..."}}]
+Return a JSON object: {{"pairs": [{{"instruction": "...", "response": "..."}}]}}
 Make each unique in style and complexity."""},
             ],
             response_format={"type": "json_object"},
@@ -72,7 +78,7 @@ Make each unique in style and complexity."""},
         )
 
         batch = json.loads(response.choices[0].message.content)
-        examples.extend(batch.get("pairs", batch.get("data", [])))
+        examples.extend(batch.get("pairs", []))
 
     return examples
 
@@ -82,9 +88,21 @@ mlops_data = generate_instruction_data("MLOps best practices", num_examples=500)
 
 ### 2. Preference Data for DPO
 
+Caveat before you use the pattern below: sampling `rejected` from a *weaker model*
+is the quick-and-dirty approach and it teaches the wrong thing. The two responses
+differ in style and length as well as quality, so DPO learns "prefer long, verbose
+answers from the strong model" rather than "prefer the better answer". Standard
+practice is **on-policy** preference data - sample several responses from the model
+you are about to train (same model, temperature > 0), then rank them with a judge
+or human annotators. Keep chosen/rejected length distributions comparable, or
+apply a length-debiasing penalty.
+
 ```python
-def generate_preference_pairs(instructions, model="gpt-4o"):
-    """Generate chosen/rejected pairs for DPO training."""
+def generate_preference_pairs(instructions, model="gpt-5"):
+    """Generate chosen/rejected pairs for DPO training.
+
+    Illustrative only - see the on-policy caveat above.
+    """
     pairs = []
 
     for instruction in instructions:
@@ -100,7 +118,7 @@ def generate_preference_pairs(instructions, model="gpt-4o"):
 
         # Generate a worse response (less helpful, vaguer)
         bad_response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Intentionally weaker model
+            model="gpt-5-mini",  # Intentionally weaker model - introduces length bias
             messages=[
                 {"role": "system", "content": "Provide a brief response."},
                 {"role": "user", "content": instruction},
@@ -119,44 +137,58 @@ def generate_preference_pairs(instructions, model="gpt-4o"):
 
 ### 3. Data Annotation with Argilla
 
+Argilla 2.0 replaced the 1.x API entirely: `rg.init`, `rg.FeedbackDataset`,
+`rg.FeedbackRecord` and `push_to_argilla` are gone. Use the `rg.Argilla` client
+with `rg.Dataset` + `rg.Settings`, and log records through `dataset.records.log`.
+
 ```python
-import argilla as rg
+import argilla as rg   # requires argilla >= 2.0
 
-# Initialize
-rg.init(api_url="http://localhost:6900", api_key="admin.apikey")
+client = rg.Argilla(api_url="http://localhost:6900", api_key="argilla.apikey")
 
-# Create annotation dataset
-dataset = rg.FeedbackDataset(
+settings = rg.Settings(
     fields=[
         rg.TextField(name="instruction"),
         rg.TextField(name="response"),
     ],
     questions=[
         rg.RatingQuestion(name="quality", values=[1, 2, 3, 4, 5],
-                         description="Rate the response quality"),
-        rg.TextQuestion(name="improved_response",
-                       description="Provide an improved response if quality < 4"),
+                          description="Rate the response quality"),
+        rg.TextQuestion(name="improved_response", required=False,
+                        description="Provide an improved response if quality < 4"),
         rg.LabelQuestion(name="category",
-                        labels=["correct", "partially_correct", "incorrect", "harmful"]),
+                         labels=["correct", "partially_correct", "incorrect", "harmful"]),
     ],
 )
 
-# Add records
+dataset = rg.Dataset(name="llm-training-data", settings=settings, client=client)
+dataset.create()
+
+# Records carry fields, optional model suggestions, and optional metadata
 records = [
-    rg.FeedbackRecord(
-        fields={"instruction": ex["instruction"], "response": ex["response"]}
+    rg.Record(
+        fields={"instruction": ex["instruction"], "response": ex["response"]},
+        suggestions=[rg.Suggestion("quality", ex["predicted_quality"], score=0.8)],
     )
     for ex in raw_data
 ]
-dataset.add_records(records)
-dataset.push_to_argilla(name="llm-training-data")
+dataset.records.log(records)
+
+# Pull annotations back out
+for record in dataset.records(with_responses=True):
+    print(record.fields["instruction"], record.responses["quality"])
 ```
 
 ### 4. Data Quality Assessment
 
 ```python
+import random
+import numpy as np
+
 def assess_data_quality(dataset):
     """Comprehensive quality assessment of training data."""
+    if not dataset:
+        return {"error": "empty dataset"}
     report = {}
 
     # Length statistics
@@ -208,7 +240,7 @@ Consider: accuracy, helpfulness, completeness, formatting.
 Return just the number (1-5):"""
 
     result = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5-mini",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=5,
     )
@@ -224,30 +256,30 @@ Return just the number (1-5):"""
 from datasketch import MinHash, MinHashLSH
 
 def deduplicate_dataset(dataset, threshold=0.8, num_perm=128):
-    """Remove near-duplicate examples using MinHash LSH."""
+    """Remove near-duplicate examples using MinHash LSH.
+
+    Insert-then-query in one pass: lsh.query() returns the keys of everything
+    already indexed that is within `threshold`, so the first occurrence is kept
+    and later near-duplicates are skipped. (Note: lsh.insert raising ValueError
+    means the KEY already exists, not that a duplicate was found - it is not a
+    duplicate signal.)
+    """
     lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
-    minhashes = {}
+    unique = []
 
     for i, example in enumerate(dataset):
         text = example["instruction"] + " " + example["response"]
         m = MinHash(num_perm=num_perm)
-        for word in text.lower().split():
-            m.update(word.encode("utf-8"))
-        minhashes[i] = m
+        # Shingle on word trigrams, not single words: bag-of-words MinHash calls
+        # any two documents with the same vocabulary duplicates.
+        words = text.lower().split()
+        shingles = {" ".join(words[j:j+3]) for j in range(max(len(words) - 2, 1))}
+        for shingle in shingles:
+            m.update(shingle.encode("utf-8"))
 
-        try:
-            lsh.insert(str(i), m)
-        except ValueError:
-            pass  # Duplicate found
-
-    # Find unique examples
-    seen = set()
-    unique = []
-    for i, example in enumerate(dataset):
-        if i in seen:
+        if lsh.query(m):        # a near-duplicate is already indexed
             continue
-        result = lsh.query(minhashes[i])
-        seen.update(int(r) for r in result)
+        lsh.insert(str(i), m)
         unique.append(example)
 
     print(f"Removed {len(dataset) - len(unique)} near-duplicates")
@@ -287,12 +319,17 @@ def format_alpaca(examples):
 2. **Diversify instructions** - Vary style, complexity, and task type
 3. **Use LLM judges** to filter low-quality examples
 4. **Deduplicate aggressively** - Near-duplicates hurt generalization
-5. **Remove PII** before training
-6. **Version your datasets** - Track what data trained which model
-7. **Balance categories** - Don't over-represent any single topic
-8. **Include edge cases** - Refusals, "I don't know", multi-step reasoning
-9. **Validate with human annotators** on a sample
-10. **Check licensing** of source data
+5. **Decontaminate against your benchmarks** - Run the same near-dup machinery
+   between your training set and every eval set you report on (13-gram overlap or
+   MinHash at threshold ~0.8 are the common choices, per the Llama/GPT-4 reports).
+   Skipping this is the single most common cause of eval scores that do not
+   survive contact with production. See REFERENCE.md for a worked example.
+6. **Remove PII** before training
+7. **Version your datasets** - Track what data trained which model
+8. **Balance categories** - Don't over-represent any single topic
+9. **Include edge cases** - Refusals, "I don't know", multi-step reasoning
+10. **Validate with human annotators** on a sample
+11. **Check licensing** of source data
 
 ## Scripts
 

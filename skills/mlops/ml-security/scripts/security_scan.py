@@ -3,11 +3,12 @@
 ML Security Scanner — Comprehensive security scanning for ML systems.
 
 Features:
-    - Adversarial robustness testing (ART library)
+    - Model load smoke check (framework load + stochastic-layer / pickle exposure
+      report; does NOT run adversarial attacks — see ModelLoadSmokeCheckScanner)
     - Input validation checks
     - Model artifact integrity verification
-    - Dependency vulnerability scanning
-    - PII detection in training data
+    - Dependency vulnerability scanning (pip-audit, safety)
+    - PII detection in training data (regex + Luhn; format-only, see PIIScanner)
     - Pickle safety analysis
     - Security report generation
     - CLI interface
@@ -169,13 +170,34 @@ class BaseScanner(ABC):
 # 1. Adversarial Robustness Scanner
 # ---------------------------------------------------------------------------
 
-class AdversarialRobustnessScanner(BaseScanner):
-    """Test model robustness against adversarial attacks using ART."""
+class ModelLoadSmokeCheckScanner(BaseScanner):
+    """
+    Load-time smoke check for model artifacts.
 
-    name = "adversarial_robustness"
+    SCOPE: this scanner does NOT run adversarial attacks. It verifies that the
+    artifact loads in the declared framework, reports what it found (layer
+    types, stochastic layers, pickle exposure), and tells you whether the ART
+    toolchain needed for a real robustness evaluation is installed.
+
+    A real robustness evaluation needs a labelled evaluation set and a wrapped
+    estimator, neither of which a file-path-only scan has. Do it explicitly:
+
+        from art.estimators.classification import PyTorchClassifier
+        from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent
+        clf = PyTorchClassifier(model=model, loss=loss_fn, optimizer=opt,
+                                input_shape=(3, 224, 224), nb_classes=10)
+        x_adv = ProjectedGradientDescent(estimator=clf, eps=0.03,
+                                         max_iter=40).generate(x=x_test)
+        # then compare accuracy on x_test vs x_adv
+
+    See references/REFERENCE.md sections 3 and 17 for full examples.
+    """
+
+    name = "model_load_smoke_check"
 
     def scan(self, model_path: str = None, framework: str = "pytorch",
-             epsilon: float = 0.03, attacks: List[str] = None, **kwargs) -> ScanResult:
+             epsilon: float = 0.03, attacks: List[str] = None,
+             allow_unsafe_load: bool = False, **kwargs) -> ScanResult:
         start = time.time()
         findings = []
 
@@ -185,14 +207,14 @@ class AdversarialRobustnessScanner(BaseScanner):
                 findings=[Finding(
                     category="robustness", severity="info",
                     title="No model path provided",
-                    description="Skipping adversarial robustness scan — no model specified.",
+                    description="Skipping model load smoke check — no model specified.",
                 )],
                 duration_seconds=time.time() - start,
             )
 
         attacks = attacks or ["fgsm", "pgd"]
 
-        # Check if ART is available
+        # Report whether the toolchain for a real robustness evaluation exists.
         try:
             import art  # noqa: F401
             art_available = True
@@ -201,10 +223,11 @@ class AdversarialRobustnessScanner(BaseScanner):
             findings.append(Finding(
                 category="robustness",
                 severity="medium",
-                title="ART library not installed",
+                title="ART library not installed — no robustness evaluation possible",
                 description=(
-                    "The Adversarial Robustness Toolbox (ART) is required for robustness "
-                    "testing but is not installed."
+                    "The Adversarial Robustness Toolbox (ART) is required to run FGSM/PGD "
+                    "evaluations. This scanner only smoke-checks that the artifact loads; "
+                    "attacks must be run separately against a labelled evaluation set."
                 ),
                 remediation="pip install adversarial-robustness-toolbox",
             ))
@@ -220,8 +243,22 @@ class AdversarialRobustnessScanner(BaseScanner):
                 findings=findings, duration_seconds=time.time() - start,
             )
 
-        if art_available:
-            findings.extend(self._run_art_scan(model_path, framework, epsilon, attacks))
+        findings.extend(
+            self._run_load_check(model_path, framework, allow_unsafe_load)
+        )
+        findings.append(Finding(
+            category="robustness", severity="info",
+            title="No adversarial attacks were executed",
+            description=(
+                f"Requested attacks {attacks} at epsilon={epsilon} were NOT run. "
+                "A robustness evaluation needs labelled evaluation data and a wrapped "
+                "ART estimator; see the class docstring and REFERENCE.md section 3."
+            ),
+            remediation=(
+                "Run ART FastGradientMethod / ProjectedGradientDescent against your "
+                "held-out test set and compare clean vs adversarial accuracy."
+            ),
+        ))
 
         # Determine overall status
         severities = [f.severity for f in findings]
@@ -235,20 +272,24 @@ class AdversarialRobustnessScanner(BaseScanner):
         return ScanResult(
             scanner_name=self.name, status=status,
             findings=findings, duration_seconds=time.time() - start,
-            metadata={"epsilon": epsilon, "attacks": attacks, "framework": framework},
+            metadata={
+                "epsilon": epsilon, "attacks_requested": attacks,
+                "attacks_executed": [], "framework": framework,
+                "art_available": art_available,
+            },
         )
 
-    def _run_art_scan(self, model_path: str, framework: str,
-                      epsilon: float, attacks: List[str]) -> List[Finding]:
-        """Execute ART-based adversarial robustness tests."""
+    def _run_load_check(self, model_path: str, framework: str,
+                        allow_unsafe_load: bool = False) -> List[Finding]:
+        """Load the artifact in the declared framework and describe it."""
         findings = []
         try:
             if framework == "pytorch":
-                findings.extend(self._scan_pytorch(model_path, epsilon, attacks))
+                findings.extend(self._scan_pytorch(model_path, allow_unsafe_load))
             elif framework == "tensorflow":
-                findings.extend(self._scan_tensorflow(model_path, epsilon, attacks))
+                findings.extend(self._scan_tensorflow(model_path))
             elif framework == "sklearn":
-                findings.extend(self._scan_sklearn(model_path, epsilon, attacks))
+                findings.extend(self._scan_sklearn(model_path, allow_unsafe_load))
             else:
                 findings.append(Finding(
                     category="robustness", severity="info",
@@ -259,77 +300,124 @@ class AdversarialRobustnessScanner(BaseScanner):
         except Exception as e:
             findings.append(Finding(
                 category="robustness", severity="medium",
-                title="Robustness scan encountered an error",
+                title="Model load check encountered an error",
                 description=str(e),
-                remediation="Check model format compatibility and ART version.",
+                remediation="Check model format compatibility and framework version.",
             ))
         return findings
 
-    def _scan_pytorch(self, model_path: str, epsilon: float,
-                      attacks: List[str]) -> List[Finding]:
+    def _scan_pytorch(self, model_path: str,
+                      allow_unsafe_load: bool = False) -> List[Finding]:
         findings = []
         try:
             import torch
-            from art.estimators.classification import PyTorchClassifier
-            from art.attacks.evasion import (
-                FastGradientMethod, ProjectedGradientDescent,
+        except ImportError:
+            return [Finding(
+                category="robustness", severity="medium",
+                title="PyTorch not installed",
+                description="Cannot load the artifact without torch.",
+                remediation="pip install torch",
+            )]
+
+        # Load weights-only by default: unpickling a whole nn.Module executes
+        # arbitrary code, which is exactly the risk this scanner reports on.
+        try:
+            obj = torch.load(model_path, map_location="cpu", weights_only=True)
+            loaded_unsafely = False
+        except Exception as safe_err:
+            if not allow_unsafe_load:
+                findings.append(Finding(
+                    category="robustness", severity="medium",
+                    title="Artifact requires unsafe (pickle) deserialization",
+                    description=(
+                        f"torch.load(weights_only=True) failed: {safe_err}\n"
+                        "The file therefore contains pickled Python objects, not just "
+                        "tensors. The scanner did NOT unpickle it, because doing so would "
+                        "execute code from the artifact under audit."
+                    ),
+                    remediation=(
+                        "Re-save as a state_dict or safetensors. To inspect anyway, "
+                        "re-run in a sandbox with --allow-unsafe-load, and check the file "
+                        "first with `fickling <file> --check-safety`."
+                    ),
+                ))
+                return findings
+            logger.warning(
+                "Loading %s with weights_only=False as explicitly requested — "
+                "this executes pickle payloads in the artifact.", model_path,
             )
+            obj = torch.load(model_path, map_location="cpu", weights_only=False)
+            loaded_unsafely = True
 
-            model = torch.load(model_path, map_location="cpu", weights_only=False)
-            model.eval()
-
-            # Try to infer input shape and number of classes from model
-            # This is a best-effort heuristic
-            logger.info("PyTorch model loaded. Running adversarial robustness tests...")
-
+        if isinstance(obj, dict):
             findings.append(Finding(
                 category="robustness", severity="info",
-                title="PyTorch model loaded successfully",
+                title="PyTorch state_dict loaded successfully",
                 description=(
-                    f"Model loaded from {model_path}. "
-                    f"Run with test data for full robustness evaluation."
+                    f"Loaded {len(obj)} tensor entries from {model_path} with "
+                    "weights_only=True. Instantiate the architecture separately to "
+                    "evaluate the model."
                 ),
             ))
+            return findings
 
-            # Check for eval-mode issues
-            has_dropout = any(
-                "dropout" in name.lower()
-                for name, _ in model.named_modules()
-            )
-            has_batchnorm = any(
-                "batchnorm" in name.lower() or "batch_norm" in name.lower()
-                for name, _ in model.named_modules()
-            )
-            if has_dropout or has_batchnorm:
-                findings.append(Finding(
-                    category="robustness", severity="low",
-                    title="Model uses stochastic layers",
-                    description=(
-                        "Model contains Dropout or BatchNorm layers. Ensure model.eval() "
-                        "is called before inference to disable stochastic behavior."
-                    ),
-                    remediation="Always call model.eval() before adversarial testing.",
-                ))
+        model = obj
+        try:
+            model.eval()
+        except Exception:
+            pass
+        findings.append(Finding(
+            category="robustness", severity="info",
+            title="PyTorch module loaded successfully",
+            description=(
+                f"Model loaded from {model_path}"
+                + (" (unsafe pickle load, explicitly allowed)." if loaded_unsafely else ".")
+            ),
+        ))
 
-        except Exception as e:
+        # Detect stochastic layers by CLASS name; named_modules() yields the
+        # attribute path (e.g. "features.3"), which usually contains no type info.
+        module_types = {type(m).__name__.lower() for _, m in model.named_modules()}
+        has_dropout = any("dropout" in t for t in module_types)
+        has_batchnorm = any("batchnorm" in t or "instancenorm" in t for t in module_types)
+        if has_dropout or has_batchnorm:
             findings.append(Finding(
-                category="robustness", severity="medium",
-                title="Failed to load PyTorch model",
-                description=str(e),
+                category="robustness", severity="low",
+                title="Model uses stochastic / running-statistics layers",
+                description=(
+                    "Model contains Dropout or BatchNorm layers. Ensure model.eval() "
+                    "is called before inference to disable stochastic behavior."
+                ),
+                remediation="Always call model.eval() before adversarial testing.",
+                metadata={"dropout": has_dropout, "batchnorm": has_batchnorm},
             ))
         return findings
 
-    def _scan_tensorflow(self, model_path: str, epsilon: float,
-                         attacks: List[str]) -> List[Finding]:
+    def _scan_tensorflow(self, model_path: str) -> List[Finding]:
         findings = []
         try:
             import tensorflow as tf
             model = tf.keras.models.load_model(model_path)
+            layer_types = [type(layer).__name__ for layer in model.layers]
             findings.append(Finding(
                 category="robustness", severity="info",
                 title="TensorFlow model loaded successfully",
                 description=f"Model loaded from {model_path}. Layers: {len(model.layers)}",
+                metadata={"layer_types": sorted(set(layer_types))},
             ))
+            if "Lambda" in layer_types:
+                findings.append(Finding(
+                    category="robustness", severity="high",
+                    title="Keras Lambda layer detected",
+                    description=(
+                        "Lambda layers store Python bytecode that is executed on load. "
+                        "This artifact can run arbitrary code in any process that loads it."
+                    ),
+                    remediation=(
+                        "Replace Lambda layers with a registered custom layer class, and "
+                        "load untrusted models with safe_mode=True."
+                    ),
+                ))
         except Exception as e:
             findings.append(Finding(
                 category="robustness", severity="medium",
@@ -338,30 +426,40 @@ class AdversarialRobustnessScanner(BaseScanner):
             ))
         return findings
 
-    def _scan_sklearn(self, model_path: str, epsilon: float,
-                      attacks: List[str]) -> List[Finding]:
+    def _scan_sklearn(self, model_path: str,
+                      allow_unsafe_load: bool = False) -> List[Finding]:
         findings = []
+        # joblib.load unpickles; do not do it unless explicitly allowed.
+        findings.append(Finding(
+            category="robustness", severity="medium",
+            title="Pickle deserialization risk",
+            description=(
+                "scikit-learn models saved with joblib/pickle execute arbitrary code "
+                "on load."
+            ),
+            remediation=(
+                "Use skops.io for safer serialization, or verify artifact integrity "
+                "with signed manifests before loading."
+            ),
+        ))
+        if not allow_unsafe_load:
+            findings.append(Finding(
+                category="robustness", severity="info",
+                title="sklearn artifact not deserialized",
+                description=(
+                    "The scanner did not unpickle the artifact. Re-run with "
+                    "--allow-unsafe-load in a sandbox to inspect the estimator, or use "
+                    "`fickling <file> --check-safety` for a static check."
+                ),
+            ))
+            return findings
         try:
             import joblib
             model = joblib.load(model_path)
-            model_type = type(model).__name__
             findings.append(Finding(
                 category="robustness", severity="info",
                 title="scikit-learn model loaded",
-                description=f"Model type: {model_type}.",
-            ))
-            # Warn about pickle deserialization
-            findings.append(Finding(
-                category="robustness", severity="medium",
-                title="Pickle deserialization risk",
-                description=(
-                    "scikit-learn models saved with joblib/pickle are vulnerable to "
-                    "arbitrary code execution on load."
-                ),
-                remediation=(
-                    "Use skops.io for safer serialization, or verify artifact integrity "
-                    "with signed manifests before loading."
-                ),
+                description=f"Model type: {type(model).__name__}.",
             ))
         except Exception as e:
             findings.append(Finding(
@@ -478,7 +576,7 @@ class InputValidationScanner(BaseScanner):
                     "No input validation or sanitization code was detected in the project. "
                     "ML APIs should validate input shape, dtype, range, and size."
                 ),
-                remediation="Implement input validation. See SKILL.md section 10.3.",
+                remediation="Implement input validation. See SKILL.md section 10.2.",
             ))
 
         severities = [f.severity for f in findings]
@@ -508,7 +606,16 @@ class ArtifactIntegrityScanner(BaseScanner):
     name = "artifact_integrity"
 
     def scan(self, model_path: str = None, manifest_path: str = None,
-             signing_key: str = None, **kwargs) -> ScanResult:
+             signing_key: str = None, pickle_severity: str = "high",
+             **kwargs) -> ScanResult:
+        """
+        Args:
+            pickle_severity: severity assigned to pickle-based formats
+                (.pkl/.pickle/.joblib). Defaults to "high", which makes the
+                overall scan FAIL (exit 2). Teams whose registry is legitimately
+                joblib-based can lower this to "medium" (warning) or "low" via
+                --pickle-severity so the gate stays useful.
+        """
         start = time.time()
         findings = []
 
@@ -547,11 +654,28 @@ class ArtifactIntegrityScanner(BaseScanner):
         # Check file extension safety
         ext = model_file.suffix.lower()
         unsafe_extensions = {".pkl", ".pickle", ".joblib"}
-        safe_extensions = {".onnx", ".safetensors", ".tflite", ".pb", ".h5"}
+        safe_extensions = {".onnx", ".safetensors", ".tflite"}
+        # Formats that carry executable graph/config content but not raw pickle.
+        code_bearing_extensions = {
+            ".h5": (
+                "Keras HDF5 models store layer configuration, including Lambda layers whose "
+                "Python code is deserialized (marshalled bytecode) on load. Loading an "
+                "untrusted .h5 can therefore execute attacker-controlled code."
+            ),
+            ".keras": (
+                "The .keras v3 archive also serializes Lambda layers and custom objects; "
+                "Keras 3 refuses them unless safe_mode=False, but older loaders do not."
+            ),
+            ".pb": (
+                "TensorFlow SavedModel graphs can contain ops that read/write the filesystem "
+                "or shell out (e.g. py_function, ReadFile/WriteFile). Treat untrusted "
+                "SavedModels as untrusted code."
+            ),
+        }
 
         if ext in unsafe_extensions:
             findings.append(Finding(
-                category="artifact_integrity", severity="high",
+                category="artifact_integrity", severity=pickle_severity,
                 title=f"Unsafe serialization format: {ext}",
                 description=(
                     f"The model uses {ext} format which is vulnerable to arbitrary code "
@@ -559,14 +683,28 @@ class ArtifactIntegrityScanner(BaseScanner):
                 ),
                 remediation=(
                     "Convert to a safer format: ONNX (.onnx), SafeTensors (.safetensors), "
-                    "TFLite (.tflite), or SavedModel (.pb)."
+                    "or TFLite (.tflite)."
+                ),
+            ))
+        elif ext in code_bearing_extensions:
+            findings.append(Finding(
+                category="artifact_integrity", severity="medium",
+                title=f"Format can carry executable content: {ext}",
+                description=code_bearing_extensions[ext],
+                remediation=(
+                    "Load only from trusted, hash-verified sources. Prefer weights-only "
+                    "formats (.safetensors) or export to ONNX. For Keras, load with "
+                    "safe_mode=True (default in Keras 3) and reject Lambda layers."
                 ),
             ))
         elif ext in safe_extensions:
             findings.append(Finding(
                 category="artifact_integrity", severity="info",
                 title=f"Safe serialization format: {ext}",
-                description="Model uses a format that does not support arbitrary code execution.",
+                description=(
+                    "Model uses a weights/graph-only format that does not deserialize "
+                    "Python objects."
+                ),
             ))
         elif ext == ".pt" or ext == ".pth":
             findings.append(Finding(
@@ -762,28 +900,49 @@ class DependencyScanner(BaseScanner):
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120,
             )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                vulns = data.get("dependencies", [])
-                for dep in vulns:
+            # pip-audit exit codes: 0 = no vulnerabilities, 1 = vulnerabilities
+            # found (JSON still on stdout), >1 = tool error. Parsing only on 0
+            # would silently drop every real finding.
+            if result.returncode in (0, 1):
+                try:
+                    data = json.loads(result.stdout)
+                except json.JSONDecodeError as e:
+                    findings.append(Finding(
+                        category="dependencies", severity="medium",
+                        title="pip-audit output could not be parsed",
+                        description=f"{e}. stderr: {result.stderr[:300]}",
+                        remediation="Run pip-audit manually to inspect the failure.",
+                    ))
+                    return findings
+                # --format json emits {"dependencies": [...]}; older versions
+                # emit a bare list of dependency objects.
+                deps = data.get("dependencies", []) if isinstance(data, dict) else data
+                for dep in deps:
                     for vuln in dep.get("vulns", []):
                         severity = self._cvss_to_severity(vuln.get("fix_versions", []))
                         findings.append(Finding(
                             category="dependencies",
                             severity=severity,
-                            title=f"Vulnerability in {dep['name']} {dep['version']}",
+                            title=f"Vulnerability in {dep.get('name')} {dep.get('version')}",
                             description=f"{vuln.get('id', 'Unknown')}: {vuln.get('description', '')}",
                             remediation=f"Upgrade to: {', '.join(vuln.get('fix_versions', ['latest']))}",
-                            metadata={"vuln_id": vuln.get("id"), "package": dep["name"]},
+                            metadata={"vuln_id": vuln.get("id"), "package": dep.get("name")},
                         ))
-                if not any(dep.get("vulns") for dep in vulns):
+                if not any(dep.get("vulns") for dep in deps):
                     findings.append(Finding(
                         category="dependencies", severity="info",
                         title="pip-audit: No vulnerabilities found",
                         description="All scanned packages are free of known vulnerabilities.",
                     ))
             else:
-                logger.warning(f"pip-audit exited with code {result.returncode}")
+                # Tool error: report it instead of letting the scan look clean.
+                findings.append(Finding(
+                    category="dependencies", severity="medium",
+                    title=f"pip-audit failed (exit {result.returncode})",
+                    description=(result.stderr or result.stdout)[:500]
+                                or "pip-audit produced no output.",
+                    remediation="Fix the pip-audit invocation; the dependency scan did not run.",
+                ))
         except FileNotFoundError:
             findings.append(Finding(
                 category="dependencies", severity="low",
@@ -802,34 +961,114 @@ class DependencyScanner(BaseScanner):
         return findings
 
     def _run_safety(self, requirements_path: str = None) -> List[Finding]:
+        """
+        Run Safety and parse its JSON.
+
+        Output shape differs by major version:
+          - safety 1.x  : bare list of 5+ element lists
+          - safety 2.x  : {"vulnerabilities": [{package_name, analyzed_version, ...}]}
+          - safety 3.x  : `safety scan --output json` (the `check` subcommand is
+                          deprecated) with vulnerabilities nested under
+                          scan_results/dependencies
+        A non-zero exit code means "vulnerabilities found", so the JSON must be
+        parsed regardless of the return code.
+        """
         findings = []
-        try:
-            cmd = ["safety", "check", "--json"]
-            if requirements_path and Path(requirements_path).exists():
-                cmd.extend(["--file", requirements_path])
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
-            )
-            # Safety returns non-zero if vulnerabilities are found
+        # Prefer the modern `scan` subcommand, fall back to legacy `check`.
+        commands = [["safety", "scan", "--output", "json"]]
+        legacy = ["safety", "check", "--json"]
+        if requirements_path and Path(requirements_path).exists():
+            commands[0] += ["--target", str(Path(requirements_path).parent or ".")]
+            legacy += ["--file", requirements_path]
+        commands.append(legacy)
+
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=120,
+                )
+            except FileNotFoundError:
+                return findings  # safety not installed; nothing to report
+            except subprocess.TimeoutExpired:
+                findings.append(Finding(
+                    category="dependencies", severity="low",
+                    title="safety timed out",
+                    description="Safety scan timed out after 120 seconds.",
+                ))
+                return findings
+            except Exception as e:
+                logger.warning(f"safety error: {e}")
+                return findings
+
+            if not result.stdout.strip():
+                continue
             try:
                 data = json.loads(result.stdout)
-                if isinstance(data, list):
-                    for vuln in data:
-                        if isinstance(vuln, list) and len(vuln) >= 5:
-                            findings.append(Finding(
-                                category="dependencies",
-                                severity="high",
-                                title=f"Safety: {vuln[0]} {vuln[2]}",
-                                description=vuln[3] if len(vuln) > 3 else "",
-                                remediation=f"Advisory: {vuln[4]}" if len(vuln) > 4 else "",
-                            ))
             except json.JSONDecodeError:
-                pass
-        except FileNotFoundError:
-            # Safety not installed; not an error, just skip
-            pass
-        except Exception as e:
-            logger.warning(f"safety check error: {e}")
+                continue
+            parsed = self._parse_safety_json(data)
+            if parsed:
+                return parsed
+            # Valid JSON with zero vulnerabilities: report the clean result.
+            return [Finding(
+                category="dependencies", severity="info",
+                title="safety: No vulnerabilities found",
+                description=f"Safety ({cmd[1]}) reported no known vulnerabilities.",
+            )]
+        return findings
+
+    @staticmethod
+    def _parse_safety_json(data: Any) -> List[Finding]:
+        """Normalize Safety output (1.x/2.x/3.x) into Findings."""
+        findings: List[Finding] = []
+
+        def add(pkg, version, advisory, vuln_id, fixed):
+            findings.append(Finding(
+                category="dependencies", severity="high",
+                title=f"Safety: {pkg} {version}",
+                description=f"{vuln_id or 'advisory'}: {advisory or ''}",
+                remediation=(f"Upgrade to: {fixed}" if fixed
+                             else "Upgrade to a patched version."),
+                metadata={"package": pkg, "vuln_id": vuln_id},
+            ))
+
+        if isinstance(data, list):
+            # safety 1.x: [[package, affected_spec, installed, advisory, id], ...]
+            for vuln in data:
+                if isinstance(vuln, list) and len(vuln) >= 5:
+                    add(vuln[0], vuln[2], vuln[3], vuln[4], None)
+                elif isinstance(vuln, dict):
+                    add(vuln.get("package_name"), vuln.get("analyzed_version"),
+                        vuln.get("advisory"), vuln.get("vulnerability_id"),
+                        vuln.get("fixed_versions"))
+            return findings
+
+        if not isinstance(data, dict):
+            return findings
+
+        # safety 2.x
+        for vuln in data.get("vulnerabilities", []) or []:
+            if isinstance(vuln, dict):
+                add(vuln.get("package_name"), vuln.get("analyzed_version"),
+                    vuln.get("advisory"), vuln.get("vulnerability_id"),
+                    vuln.get("fixed_versions"))
+
+        # safety 3.x: scan_results -> projects/files -> dependencies -> specifications
+        scan_results = data.get("scan_results") or {}
+        containers = []
+        if isinstance(scan_results, dict):
+            containers = (scan_results.get("projects") or []) + \
+                         (scan_results.get("files") or [])
+        for container in containers:
+            for dep in (container.get("dependencies") or []):
+                for spec in (dep.get("specifications") or []):
+                    known = ((spec.get("vulnerabilities") or {})
+                             .get("known_vulnerabilities") or [])
+                    for vuln in known:
+                        add(dep.get("name"), spec.get("raw"),
+                            vuln.get("advisory") or vuln.get("id"),
+                            vuln.get("id"),
+                            ", ".join(vuln.get("fixed_versions", []) or []) or None)
         return findings
 
     def _check_risky_packages(self, requirements_path: str) -> List[Finding]:
@@ -866,10 +1105,36 @@ class DependencyScanner(BaseScanner):
 # 5. PII Detection Scanner
 # ---------------------------------------------------------------------------
 
+def _luhn_valid(digits: str) -> bool:
+    """Luhn (mod-10) checksum used by payment card numbers."""
+    nums = [int(c) for c in digits if c.isdigit()]
+    if len(nums) < 12:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(nums)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
 class PIIScanner(BaseScanner):
-    """Detect PII (Personally Identifiable Information) in training data."""
+    """
+    Detect PII (Personally Identifiable Information) in training data.
+
+    SCOPE: format-based detection only (regex + a Luhn checksum for card
+    numbers). It cannot find names, addresses, or free-text identifiers, so it
+    is a pre-filter, not evidence of HIPAA Safe Harbor de-identification. For
+    compliance-grade discovery use Microsoft Presidio, AWS Comprehend
+    (DetectPiiEntities / Comprehend Medical), or GCP DLP.
+    """
 
     name = "pii_detection"
+
+    # Extra validators applied after a regex hit; a False result drops the match.
+    VALIDATORS = {"credit_card": _luhn_valid}
 
     PII_PATTERNS = {
         "email": (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', "high"),
@@ -919,7 +1184,10 @@ class PIIScanner(BaseScanner):
             text_content = self._read_data(data_path, sample_size)
             pii_counts = {}
             for pii_type, (pattern, severity) in self.PII_PATTERNS.items():
-                matches = re.findall(pattern, text_content)
+                matches = [m.group() for m in re.finditer(pattern, text_content)]
+                validator = self.VALIDATORS.get(pii_type)
+                if validator:
+                    matches = [m for m in matches if validator(m)]
                 if matches:
                     pii_counts[pii_type] = len(matches)
                     # Redact examples for the report
@@ -1020,7 +1288,9 @@ class PIIScanner(BaseScanner):
 # ---------------------------------------------------------------------------
 
 SCANNERS = {
-    "robustness": AdversarialRobustnessScanner,
+    # "robustness" kept as the CLI name for backwards compatibility; the
+    # scanner is a load smoke check, not an attack runner (see its docstring).
+    "robustness": ModelLoadSmokeCheckScanner,
     "input_validation": InputValidationScanner,
     "artifact": ArtifactIntegrityScanner,
     "dependencies": DependencyScanner,
@@ -1040,6 +1310,8 @@ def run_security_scan(
     epsilon: float = 0.03,
     attacks: List[str] = None,
     output_path: str = None,
+    pickle_severity: str = "high",
+    allow_unsafe_load: bool = False,
 ) -> SecurityReport:
     """Run specified security scans and generate a report."""
 
@@ -1060,25 +1332,21 @@ def run_security_scan(
 
         logger.info(f"Running scanner: {scan_name}")
         scanner = scanner_cls()
-        try:
-            result = scanner.scan(
-                model_path=model_path,
-                data_path=data_path,
-                manifest_path=manifest_path,
-                signing_key=signing_key,
-                framework=framework,
-                requirements_path=requirements_path,
-                project_dir=project_dir,
-                epsilon=epsilon,
-                attacks=attacks,
-            )
-        except TypeError:
-            # Scanner does not accept all kwargs; call with minimal set
-            result = scanner.scan(
-                model_path=model_path,
-                data_path=data_path,
-                project_dir=project_dir,
-            )
+        # Every scanner accepts **kwargs, so a single call site is enough; a
+        # TypeError here is a real bug and must not be swallowed.
+        result = scanner.scan(
+            model_path=model_path,
+            data_path=data_path,
+            manifest_path=manifest_path,
+            signing_key=signing_key,
+            framework=framework,
+            requirements_path=requirements_path,
+            project_dir=project_dir,
+            epsilon=epsilon,
+            attacks=attacks,
+            pickle_severity=pickle_severity,
+            allow_unsafe_load=allow_unsafe_load,
+        )
         report.scan_results.append(result)
 
     # Output
@@ -1126,6 +1394,15 @@ Examples:
     parser.add_argument("--project-dir", type=str, default=".", help="Project directory to scan")
     parser.add_argument("--epsilon", type=float, default=0.03, help="Adversarial epsilon (default: 0.03)")
     parser.add_argument("--attacks", type=str, default=None, help="Comma-separated attack types (fgsm,pgd)")
+    parser.add_argument("--pickle-severity", type=str, default="high",
+                        choices=["critical", "high", "medium", "low", "info"],
+                        help="Severity for pickle-based model formats (.pkl/.joblib). "
+                             "Default 'high' fails the scan; lower it if your registry "
+                             "is legitimately joblib-based (default: high)")
+    parser.add_argument("--allow-unsafe-load", action="store_true",
+                        help="Permit pickle deserialization of the model under audit "
+                             "(torch.load weights_only=False, joblib.load). Off by default; "
+                             "only use in a sandbox")
     parser.add_argument("--output", type=str, default=None, help="Path to write JSON report")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     return parser.parse_args(argv)
@@ -1152,6 +1429,8 @@ def main(argv=None):
         epsilon=args.epsilon,
         attacks=attacks,
         output_path=args.output,
+        pickle_severity=args.pickle_severity,
+        allow_unsafe_load=args.allow_unsafe_load,
     )
 
     # Exit code based on overall status
