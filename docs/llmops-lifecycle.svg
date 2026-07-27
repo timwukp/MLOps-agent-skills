@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 540" font-family="system-ui,-apple-system,'Segoe UI',Roboto,sans-serif">
+
+  <defs>
+    <marker id="ahB" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#5b8cff"/>
+    </marker>
+    <marker id="ahG" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#3ecf8e"/>
+    </marker>
+    <marker id="ahO" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#ffb454"/>
+    </marker>
+    <marker id="ahR" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#ff6b81"/>
+    </marker>
+    <style>
+      .bg    { fill:#0b1020; }
+      .card  { fill:#141b33; stroke-width:2; rx:12; }
+      .cDesign{ stroke:#b48cff; } .cData{ stroke:#5b8cff; } .cTrain{ stroke:#ffb454; }
+      .cDeploy{ stroke:#3ecf8e; } .cOps{ stroke:#ff6b81; } .cCross{ stroke:#26305a; }
+      .title { fill:#e7ecff; font-size:14px; font-weight:650; }
+      .sub   { fill:#8592c0; font-size:10px; }
+      .band  { fill:#101731; stroke:#26305a; stroke-width:1.5; }
+      .bandT { fill:#8592c0; font-size:11px; font-weight:600; letter-spacing:1px; }
+      .lgd   { fill:#8592c0; font-size:11px; }
+      .wire  { stroke:#5b8cff; stroke-width:2.5; fill:none; stroke-dasharray:7 6; animation:dash 1.1s linear infinite; }
+      .wireG { stroke:#3ecf8e; stroke-width:2.5; fill:none; stroke-dasharray:7 6; animation:dash 1.1s linear infinite; }
+      .wireO { stroke:#ffb454; stroke-width:2.5; fill:none; stroke-dasharray:7 6; animation:dash 1.1s linear infinite; }
+      .wireR { stroke:#ff6b81; stroke-width:2.5; fill:none; stroke-dasharray:7 6; animation:dash 1.4s linear infinite; }
+      .wireDim { stroke:#26305a; stroke-width:2; fill:none; stroke-dasharray:4 5; }
+      @keyframes dash { to { stroke-dashoffset:-13; } }
+      a { cursor:pointer; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1240" height="540" rx="16"/>
+  <text class="title" x="30" y="42" font-size="18">LLMOps Delivery Chain</text>
+  <text class="sub" x="30" y="62">click any card to open its SKILL.md</text>
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/ml-solution-design/SKILL.md" target="_top">
+    <g>
+      <rect class="card cDesign" x="30" y="140" width="176" height="58" rx="12"/>
+      <text class="title" x="118.0" y="166" text-anchor="middle">🎯 ml-solution-design</text>
+      <text class="sub" x="118.0" y="184" text-anchor="middle">intake · architecture</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-data-preparation/SKILL.md" target="_top">
+    <g>
+      <rect class="card cData" x="250" y="140" width="176" height="58" rx="12"/>
+      <text class="title" x="338.0" y="166" text-anchor="middle">🧹 llm-data-preparation</text>
+      <text class="sub" x="338.0" y="184" text-anchor="middle">synthetic · dedup</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-fine-tuning/SKILL.md" target="_top">
+    <g>
+      <rect class="card cTrain" x="470" y="100" width="176" height="58" rx="12"/>
+      <text class="title" x="558.0" y="126" text-anchor="middle">🎛️ llm-fine-tuning</text>
+      <text class="sub" x="558.0" y="144" text-anchor="middle">LoRA · DPO</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-rag/SKILL.md" target="_top">
+    <g>
+      <rect class="card cTrain" x="470" y="184" width="176" height="58" rx="12"/>
+      <text class="title" x="558.0" y="210" text-anchor="middle">🔎 llm-rag</text>
+      <text class="sub" x="558.0" y="228" text-anchor="middle">chunking · hybrid search</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-evaluation/SKILL.md" target="_top">
+    <g>
+      <rect class="card cTrain" x="690" y="140" width="176" height="58" rx="12"/>
+      <text class="title" x="778.0" y="166" text-anchor="middle">🧾 llm-evaluation</text>
+      <text class="sub" x="778.0" y="184" text-anchor="middle">RAGAS · LLM-as-judge</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-deployment/SKILL.md" target="_top">
+    <g>
+      <rect class="card cDeploy" x="910" y="140" width="176" height="58" rx="12"/>
+      <text class="title" x="998.0" y="166" text-anchor="middle">🌐 llm-deployment</text>
+      <text class="sub" x="998.0" y="184" text-anchor="middle">vLLM · Bedrock</text>
+    </g>
+  </a>
+
+  <path class="wire" d="M206,169.0 L242,169.0" marker-end="url(#ahB)"/>
+
+  <path class="wire" d="M426,169.0 C 456,169.0 430,129.0 462,129.0" marker-end="url(#ahB)"/>
+
+  <path class="wire" d="M426,169.0 C 456,169.0 430,213.0 462,213.0" marker-end="url(#ahB)"/>
+
+  <path class="wireO" d="M646,129.0 C 676,129.0 650,169.0 682,169.0" marker-end="url(#ahO)"/>
+
+  <path class="wireO" d="M646,213.0 C 676,213.0 650,169.0 682,169.0" marker-end="url(#ahO)"/>
+
+  <path class="wireG" d="M866,169.0 L902,169.0" marker-end="url(#ahG)"/>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-agent-orchestration/SKILL.md" target="_top">
+    <g>
+      <rect class="card cDeploy" x="910" y="300" width="176" height="58" rx="12"/>
+      <text class="title" x="998.0" y="326" text-anchor="middle">🤖 llm-agent-orchestration</text>
+      <text class="sub" x="998.0" y="344" text-anchor="middle">LangGraph · tools</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-guardrails/SKILL.md" target="_top">
+    <g>
+      <rect class="card cOps" x="690" y="300" width="176" height="58" rx="12"/>
+      <text class="title" x="778.0" y="326" text-anchor="middle">🛡️ llm-guardrails</text>
+      <text class="sub" x="778.0" y="344" text-anchor="middle">PII · Bedrock Guardrails</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-observability/SKILL.md" target="_top">
+    <g>
+      <rect class="card cOps" x="470" y="300" width="176" height="58" rx="12"/>
+      <text class="title" x="558.0" y="326" text-anchor="middle">📈 llm-observability</text>
+      <text class="sub" x="558.0" y="344" text-anchor="middle">tokens · latency · traces</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-cost-optimization/SKILL.md" target="_top">
+    <g>
+      <rect class="card cOps" x="250" y="300" width="176" height="58" rx="12"/>
+      <text class="title" x="338.0" y="326" text-anchor="middle">💰 llm-cost-optimization</text>
+      <text class="sub" x="338.0" y="344" text-anchor="middle">routing · caching</text>
+    </g>
+  </a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-prompt-engineering/SKILL.md" target="_top">
+    <g>
+      <rect class="card cCross" x="30" y="300" width="176" height="58" rx="12"/>
+      <text class="title" x="118.0" y="326" text-anchor="middle">✍️ llm-prompt-engineering</text>
+      <text class="sub" x="118.0" y="344" text-anchor="middle">cross-cutting</text>
+    </g>
+  </a>
+
+  <path class="wireG" d="M998.0,198 L998.0,292" marker-end="url(#ahG)"/>
+
+  <path class="wireR" d="M902,329.0 L870,329.0" marker-end="url(#ahR)"/>
+
+  <path class="wireR" d="M682,329.0 L650,329.0" marker-end="url(#ahR)"/>
+
+  <path class="wireR" d="M462,329.0 L430,329.0" marker-end="url(#ahR)"/>
+
+  <path class="wireR" d="M338.0,358 C 338.0,408 1078.0,408 1105,218 " marker-end="url(#ahR)"/>
+
+  <text class="sub" x="640" y="403" text-anchor="middle" fill="#ff6b81">optimization loop → cheaper routing, caching, compression</text>
+  <rect class="band" x="30" y="440" width="1180" height="70" rx="14"/>
+  <text class="bandT" x="50" y="466">BRIDGES TO CLASSIC MLOPS — fine-tuned models flow through:</text>
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-registry/SKILL.md" target="_top"><g>
+      <rect class="card cCross" x="480" y="456" width="190" height="38" rx="10"/>
+      <text class="title" x="575" y="480" text-anchor="middle" font-size="12">📦 model-registry</text>
+    </g></a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-serving/SKILL.md" target="_top"><g>
+      <rect class="card cCross" x="700" y="456" width="190" height="38" rx="10"/>
+      <text class="title" x="795" y="480" text-anchor="middle" font-size="12">🌐 model-serving</text>
+    </g></a>
+
+  <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-monitoring/SKILL.md" target="_top"><g>
+      <rect class="card cCross" x="920" y="456" width="190" height="38" rx="10"/>
+      <text class="title" x="1015" y="480" text-anchor="middle" font-size="12">📈 model-monitoring</text>
+    </g></a>
+
+</svg>

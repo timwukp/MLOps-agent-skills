@@ -54,6 +54,14 @@ section naming its upstream and downstream neighbors.
 
 ### MLOps chain
 
+[![MLOps delivery chain](docs/mlops-lifecycle.svg)](docs/mlops-lifecycle.svg)
+
+<sub>Open the SVG directly for clickable cards + animated flows; the Mermaid source below renders inline with the same click-through.</sub>
+
+<details>
+<summary>Mermaid source (inline-rendered fallback)</summary>
+
+
 ```mermaid
 flowchart TD
     SD(["🎯 ml-solution-design"]) --> DI["📥 data-ingestion"]
@@ -70,18 +78,18 @@ flowchart TD
     MM --> DD["🌊 model-drift-detection"]
     DD -->|retraining trigger| MT
 
-    click SD "skills/mlops/ml-solution-design/SKILL.md" "Requirements intake & architecture decisions"
-    click DI "skills/mlops/data-ingestion/SKILL.md" "Batch/streaming ingestion"
-    click DV "skills/mlops/data-validation/SKILL.md" "Great Expectations, Pandera, contracts"
-    click FE "skills/mlops/feature-engineering/SKILL.md" "Transformations, encoding, selection"
-    click FS "skills/mlops/feature-store/SKILL.md" "Feast, online/offline stores"
-    click MT "skills/mlops/model-training/SKILL.md" "HPO, distributed training"
-    click ET "skills/mlops/ml-experiment-tracking/SKILL.md" "MLflow, W&B"
-    click MR "skills/mlops/model-registry/SKILL.md" "Versioning, aliases, promotion"
-    click CI "skills/mlops/ml-cicd/SKILL.md" "Model CI, GitHub Actions, SageMaker Pipelines"
-    click MS "skills/mlops/model-serving/SKILL.md" "FastAPI, BentoML, SageMaker endpoints"
-    click MM "skills/mlops/model-monitoring/SKILL.md" "Evidently, Model Monitor, runbooks"
-    click DD "skills/mlops/model-drift-detection/SKILL.md" "PSI, KS test, retraining triggers"
+    click SD "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/ml-solution-design/SKILL.md" "Requirements intake & architecture decisions"
+    click DI "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/data-ingestion/SKILL.md" "Batch/streaming ingestion"
+    click DV "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/data-validation/SKILL.md" "Great Expectations, Pandera, contracts"
+    click FE "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/feature-engineering/SKILL.md" "Transformations, encoding, selection"
+    click FS "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/feature-store/SKILL.md" "Feast, online/offline stores"
+    click MT "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-training/SKILL.md" "HPO, distributed training"
+    click ET "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/ml-experiment-tracking/SKILL.md" "MLflow, W&B"
+    click MR "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-registry/SKILL.md" "Versioning, aliases, promotion"
+    click CI "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/ml-cicd/SKILL.md" "Model CI, GitHub Actions, SageMaker Pipelines"
+    click MS "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-serving/SKILL.md" "FastAPI, BentoML, SageMaker endpoints"
+    click MM "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-monitoring/SKILL.md" "Evidently, Model Monitor, runbooks"
+    click DD "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-drift-detection/SKILL.md" "PSI, KS test, retraining triggers"
 
     classDef design fill:#7c5cff,stroke:#5a3fd6,color:#ffffff
     classDef data fill:#0ea5e9,stroke:#0284c7,color:#ffffff
@@ -95,6 +103,8 @@ flowchart TD
     class MM,DD ops
 ```
 
+</details>
+
 **Cross-cutting** (apply at every stage):
 [`ml-testing`](skills/mlops/ml-testing/SKILL.md) quality gates inside ml-cicd ·
 [`ml-security`](skills/mlops/ml-security/SKILL.md) adversarial robustness, privacy, compliance ·
@@ -106,6 +116,14 @@ The training → registry → serving → monitoring handoff is specified in
 [`ARTIFACT_CONTRACT.md`](skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md).
 
 ### LLMOps chain
+
+[![LLMOps delivery chain](docs/llmops-lifecycle.svg)](docs/llmops-lifecycle.svg)
+
+<sub>Open the SVG directly for clickable cards + animated flows; the Mermaid source below renders inline with the same click-through.</sub>
+
+<details>
+<summary>Mermaid source (inline-rendered fallback)</summary>
+
 
 ```mermaid
 flowchart TD
@@ -122,16 +140,16 @@ flowchart TD
     OBS --> CO["💰 llm-cost-optimization"]
     CO -.optimization loop.-> DEP
 
-    click SD "skills/mlops/ml-solution-design/SKILL.md" "Requirements intake & architecture decisions"
-    click DP "skills/llmops/llm-data-preparation/SKILL.md" "Synthetic data, dedup, quality"
-    click FT "skills/llmops/llm-fine-tuning/SKILL.md" "LoRA, QLoRA, DPO"
-    click RAG "skills/llmops/llm-rag/SKILL.md" "Chunking, embeddings, hybrid search"
-    click EV "skills/llmops/llm-evaluation/SKILL.md" "RAGAS, LLM-as-judge, safety"
-    click DEP "skills/llmops/llm-deployment/SKILL.md" "vLLM, Bedrock, quantization"
-    click AO "skills/llmops/llm-agent-orchestration/SKILL.md" "Tool use, LangGraph, multi-agent"
-    click GR "skills/llmops/llm-guardrails/SKILL.md" "PII, jailbreak prevention, Bedrock Guardrails"
-    click OBS "skills/llmops/llm-observability/SKILL.md" "Token tracking, latency, tracing"
-    click CO "skills/llmops/llm-cost-optimization/SKILL.md" "Model routing, caching, batch API"
+    click SD "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/ml-solution-design/SKILL.md" "Requirements intake & architecture decisions"
+    click DP "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-data-preparation/SKILL.md" "Synthetic data, dedup, quality"
+    click FT "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-fine-tuning/SKILL.md" "LoRA, QLoRA, DPO"
+    click RAG "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-rag/SKILL.md" "Chunking, embeddings, hybrid search"
+    click EV "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-evaluation/SKILL.md" "RAGAS, LLM-as-judge, safety"
+    click DEP "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-deployment/SKILL.md" "vLLM, Bedrock, quantization"
+    click AO "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-agent-orchestration/SKILL.md" "Tool use, LangGraph, multi-agent"
+    click GR "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-guardrails/SKILL.md" "PII, jailbreak prevention, Bedrock Guardrails"
+    click OBS "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-observability/SKILL.md" "Token tracking, latency, tracing"
+    click CO "https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/llmops/llm-cost-optimization/SKILL.md" "Model routing, caching, batch API"
 
     classDef design fill:#7c5cff,stroke:#5a3fd6,color:#ffffff
     classDef data fill:#0ea5e9,stroke:#0284c7,color:#ffffff
@@ -144,6 +162,8 @@ flowchart TD
     class DEP,AO deploy
     class GR,OBS,CO ops
 ```
+
+</details>
 
 **Cross-cutting**: [`llm-prompt-engineering`](skills/llmops/llm-prompt-engineering/SKILL.md)
 (every stage from RAG generation to agent system prompts).
