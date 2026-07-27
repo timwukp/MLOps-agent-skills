@@ -144,24 +144,25 @@
 
   <path class="wireR" d="M462,329.0 L430,329.0" marker-end="url(#ahR)"/>
 
-  <path class="wireR" d="M338.0,358 C 338.0,408 1078.0,408 1105,218 " marker-end="url(#ahR)"/>
+  <path class="wireR" d="M338.0,358 C 338.0,372 352.0,396 378.0,396 L 1134,396 C 1160,396 1160,370 1160,344 L 1160,195.0 C 1160,169.0 1146,169.0 1090,169.0" marker-end="url(#ahR)"/>
 
-  <text class="sub" x="640" y="403" text-anchor="middle" fill="#ff6b81">optimization loop → cheaper routing, caching, compression</text>
+  <text class="sub" x="640" y="388" text-anchor="middle" fill="#ff6b81">optimization loop → cheaper routing, caching, compression</text>
   <rect class="band" x="30" y="440" width="1180" height="70" rx="14"/>
-  <text class="bandT" x="50" y="466">BRIDGES TO CLASSIC MLOPS — fine-tuned models flow through:</text>
+  <text class="bandT" x="50" y="466">BRIDGES TO CLASSIC MLOPS</text>
+  <text class="sub" x="50" y="486">fine-tuned models flow through:</text>
   <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-registry/SKILL.md" target="_top"><g>
-      <rect class="card cCross" x="480" y="456" width="190" height="38" rx="10"/>
-      <text class="title" x="575" y="480" text-anchor="middle" font-size="12">📦 model-registry</text>
+      <rect class="card cCross" x="560" y="456" width="190" height="38" rx="10"/>
+      <text class="title" x="655" y="480" text-anchor="middle" font-size="12">📦 model-registry</text>
     </g></a>
 
   <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-serving/SKILL.md" target="_top"><g>
-      <rect class="card cCross" x="700" y="456" width="190" height="38" rx="10"/>
-      <text class="title" x="795" y="480" text-anchor="middle" font-size="12">🌐 model-serving</text>
+      <rect class="card cCross" x="780" y="456" width="190" height="38" rx="10"/>
+      <text class="title" x="875" y="480" text-anchor="middle" font-size="12">🌐 model-serving</text>
     </g></a>
 
   <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/model-monitoring/SKILL.md" target="_top"><g>
-      <rect class="card cCross" x="920" y="456" width="190" height="38" rx="10"/>
-      <text class="title" x="1015" y="480" text-anchor="middle" font-size="12">📈 model-monitoring</text>
+      <rect class="card cCross" x="1000" y="456" width="190" height="38" rx="10"/>
+      <text class="title" x="1095" y="480" text-anchor="middle" font-size="12">📈 model-monitoring</text>
     </g></a>
 
 </svg>
