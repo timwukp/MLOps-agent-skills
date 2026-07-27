@@ -315,3 +315,8 @@ def compute_fairness_metrics(y_true, y_pred, sensitive_attribute):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for platform comparisons.
+
+## Related skills
+
+**Upstream:** `model-serving` (prediction logs, traces) and `model-monitoring` (metrics to explain) · **Downstream:** root-cause findings feed `model-drift-detection` decisions and `model-training` fixes
+**See also:** `ml-security` for the fairness/bias overlap · `llm-observability` for the LLM counterpart

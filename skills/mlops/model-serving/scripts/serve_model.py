@@ -6,6 +6,10 @@ Usage:
     python serve_model.py --model-path model.onnx --framework onnx --port 8080
     python serve_model.py --model-path model.joblib --framework sklearn \
         --model-b-path model_v2.joblib --ab-ratio 0.2
+
+    # Serve straight from the MLflow Model Registry (see model-registry skill)
+    python serve_model.py --model-uri "models:/fraud-detector@champion"
+    python serve_model.py --model-uri "runs:/abc123def456/model"
 """
 import argparse
 import hashlib
@@ -55,11 +59,32 @@ def load_tf_model(path: str):
     return tf.saved_model.load(path)
 
 
+def load_mlflow_model(uri: str):
+    """Load a model from the MLflow Model Registry or a run via mlflow.pyfunc.
+
+    Accepts any MLflow model URI, e.g.:
+        models:/fraud-detector@champion   (registry alias -- recommended)
+        models:/fraud-detector/3          (registry version)
+        runs:/abc123def456/model          (run artifact)
+    """
+    try:
+        import mlflow.pyfunc
+    except ImportError:
+        logger.error(
+            "mlflow is required for --model-uri but is not installed. "
+            "Run: pip install mlflow"
+        )
+        sys.exit(1)
+    logger.info("Loading MLflow model from %s", uri)
+    return mlflow.pyfunc.load_model(uri)
+
+
 LOADERS = {
     "sklearn": load_sklearn_model,
     "onnx": load_onnx_model,
     "pytorch": load_pytorch_model,
     "tf": load_tf_model,
+    "mlflow": load_mlflow_model,
 }
 
 # ---------------------------------------------------------------------------
@@ -94,11 +119,18 @@ def predict_tf(model, features: list[list[float]]):
     return output.numpy().tolist()
 
 
+def predict_mlflow(model, features: list[list[float]]):
+    import numpy as np
+    preds = model.predict(np.array(features))
+    return preds.tolist() if hasattr(preds, "tolist") else list(preds)
+
+
 PREDICTORS = {
     "sklearn": predict_sklearn,
     "onnx": predict_onnx,
     "pytorch": predict_pytorch,
     "tf": predict_tf,
+    "mlflow": predict_mlflow,
 }
 
 # ---------------------------------------------------------------------------
@@ -115,10 +147,14 @@ def build_app(args):
     from pydantic import BaseModel, Field
 
     # ---- State ----
+    # --model-uri routes through the "mlflow" loader/predictor (pyfunc);
+    # --model-path uses the framework-specific loader.
+    framework = "mlflow" if args.model_uri else args.framework
+    model_source = args.model_uri or args.model_path
     state = {
-        "model_a": LOADERS[args.framework](args.model_path),
+        "model_a": LOADERS[framework](model_source),
         "model_b": None,
-        "framework": args.framework,
+        "framework": framework,
         "ab_ratio": args.ab_ratio,
         "request_count": 0,
         "error_count": 0,
@@ -138,7 +174,7 @@ def build_app(args):
 
     app = FastAPI(title="Model Serving API", version="1.0.0", lifespan=lifespan)
     if args.model_b_path:
-        state["model_b"] = LOADERS[args.framework](args.model_b_path)
+        state["model_b"] = LOADERS[framework](args.model_b_path)
         logger.info("A/B testing enabled -- %.0f%% traffic to model B", args.ab_ratio * 100)
 
     # ---- Pydantic schemas ----
@@ -256,12 +292,22 @@ def build_app(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Serve an ML model via FastAPI")
-    parser.add_argument("--model-path", required=True, help="Path to model file or directory")
+    parser.add_argument("--model-path", default=None, help="Path to local model file or directory")
+    parser.add_argument(
+        "--model-uri",
+        default=None,
+        help=(
+            "MLflow model URI to serve from the Model Registry, e.g. "
+            "'models:/fraud-detector@champion' or 'runs:/<run_id>/model'. "
+            "Loaded via mlflow.pyfunc (requires mlflow). "
+            "Mutually exclusive with --model-path."
+        ),
+    )
     parser.add_argument(
         "--framework",
-        required=True,
+        default=None,
         choices=["sklearn", "onnx", "pytorch", "tf"],
-        help="Model framework",
+        help="Model framework (required with --model-path; ignored with --model-uri)",
     )
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (default 8000)")
@@ -281,9 +327,16 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
 
-    if not Path(args.model_path).exists():
-        logger.error("Model path does not exist: %s", args.model_path)
+    if bool(args.model_path) == bool(args.model_uri):
+        logger.error("Provide exactly one of --model-path or --model-uri")
         sys.exit(1)
+    if args.model_path:
+        if not args.framework:
+            logger.error("--framework is required with --model-path")
+            sys.exit(1)
+        if not Path(args.model_path).exists():
+            logger.error("Model path does not exist: %s", args.model_path)
+            sys.exit(1)
     if args.model_b_path and not Path(args.model_b_path).exists():
         logger.error("Model B path does not exist: %s", args.model_b_path)
         sys.exit(1)

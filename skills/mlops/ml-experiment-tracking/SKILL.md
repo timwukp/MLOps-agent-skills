@@ -259,3 +259,8 @@ with mlflow.start_run(run_name="hpo-sweep") as parent_run:
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for tool comparisons.
+
+## Related skills
+
+**Upstream:** `model-training` (runs in parallel — every training job logs params, metrics, artifacts here) · **Downstream:** `model-registry` (the best run gets promoted to a registered version)
+**See also:** `ml-pipeline-orchestration` for automatic tracking inside pipelines

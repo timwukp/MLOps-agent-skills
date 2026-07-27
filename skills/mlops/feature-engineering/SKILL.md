@@ -289,3 +289,8 @@ X_umap = reducer.fit_transform(X_scaled)
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for detailed comparisons.
+
+## Related skills
+
+**Upstream:** `data-validation` (clean, validated data) · **Downstream:** `model-training` (feature matrices) or `feature-store` (reusable feature definitions)
+**See also:** `data-validation` to re-check transformed outputs · `ml-experiment-tracking` to version feature pipelines alongside runs

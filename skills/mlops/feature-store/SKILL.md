@@ -284,3 +284,8 @@ def streaming_feature_pipeline(store: FeatureStore, topic, push_source_name):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for feature store tool comparisons.
+
+## Related skills
+
+**Upstream:** `feature-engineering` (feature definitions and transformations) · **Downstream:** `model-training` (point-in-time correct offline sets) and `model-serving` (low-latency online lookups)
+**See also:** `data-ingestion` for the streams that keep online features fresh

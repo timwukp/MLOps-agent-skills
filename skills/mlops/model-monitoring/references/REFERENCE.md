@@ -203,6 +203,166 @@ Stream critical operational metrics (latency, errors, volume). Batch deeper stat
 5. **Not monitoring the monitor**: Ensure monitoring pipelines themselves have health checks.
 6. **One-size-fits-all drift detection**: Different features need different statistical tests.
 
+## Production Runbooks
+
+Concrete incident playbooks wired to this repo's scripts. Severity levels follow the
+Tiered Alerting table above; rollback always means the model-registry skill's alias flip
+(`registry_manager.py --action promote --alias champion --version <previous>`), which
+re-points serving without a redeploy.
+
+### Runbook 1: Drift Alert Fired
+
+**Severity**: PSI 0.1-0.2 on features = Medium; PSI > 0.2 on features or any prediction
+drift = High; PSI > 0.5 = Critical.
+
+**Triage**
+1. Confirm and localize with the model-drift-detection skill:
+   `python detect_drift.py --reference ref.parquet --current current.parquet --tests psi ks`
+   — which features, how far over threshold?
+2. Rule out data-quality causes first (missing-value spike, schema change, volume anomaly) —
+   an upstream pipeline bug looks like "all features drifted at once".
+3. Check prediction drift and performance:
+   `python scripts/monitor_model.py --reference ref.parquet --current current.parquet
+   --target label --thresholds thresholds.json --report drift_incident.json`.
+   If labels are delayed, use proxy labels or NannyML CBPE (see Ground Truth Delay Handling).
+4. Correlate with external events (campaign launch, seasonality, new user segment).
+
+**Escalate when**: prediction distribution shifted significantly (mean shift > 2 std),
+performance metric violates thresholds, or PSI > 0.5 on a top-importance feature.
+
+**Remediate**: single-feature drift → fix feature pipeline, retrain. Broad genuine drift →
+trigger retraining on recent data, register and gate the new version, promote via alias.
+Performance already degraded and no fixed candidate → **rollback** (alias flip above).
+
+### Runbook 2: Endpoint Error-Rate / 5xx Spike
+
+**Severity**: error rate > 1% or endpoint down = Critical (15 min response);
+0.1-1% or latency p99 > 500 ms = High.
+
+**Triage**
+1. Check the serving metrics endpoint (`GET /metrics` on `serve_model.py`):
+   `model_serving_error_rate`, `model_serving_errors_total`, latency p50/p95/p99.
+2. `GET /health` — is the process up and the model loaded? Check pod restarts / OOM kills
+   and recent deploys (`kubectl get events`, deployment history).
+3. Classify errors from serving logs: 400s (malformed client input / schema change
+   upstream) vs 500s (prediction exceptions, resource exhaustion).
+4. If the spike started at a model rollout: compare A/B legs (`model_used` in responses)
+   to isolate whether only the new model errors.
+
+**Escalate when**: errors persist > 15 min, affect > 1% of traffic, or coincide with a
+model/infra change you cannot revert yourself.
+
+**Remediate**: bad rollout → **rollback via alias flip** and restart serving (or set
+`--ab-ratio 0` to drain the B leg). Resource exhaustion → scale replicas / raise limits.
+Client-side 400s → notify the upstream team; do not "fix" by loosening input validation.
+
+### Runbook 3: Data-Quality Alert
+
+**Severity**: schema violation or missing-rate > 5x baseline = High; missing-rate 2-5x or
+volume anomaly +/- 30% = Medium.
+
+**Triage**
+1. Quantify: run `monitor_model.py` (or the data-validation skill's `validate_data.py`)
+   on the current window — which columns, what violation type, since when?
+2. Check the ingestion layer: upstream schema migration, late-arriving partition, source
+   outage, or a new client version sending different payloads.
+3. Assess model exposure: is the affected feature high-importance? Are predictions already
+   shifting (Runbook 1 step 3)?
+
+**Escalate when**: violations feed a high-importance feature, predictions are visibly
+degraded, or the upstream owner cannot give an ETA.
+
+**Remediate**: quarantine bad batches before they hit the feature store and reference data;
+if predictions are compromised, prefer holding scoring or serving the previous champion
+(**alias-flip rollback**) over serving on corrupt inputs. Never silently patch the
+reference dataset — fix the source, then rebuild the reference.
+
+### Ops Handover Checklist
+
+- [ ] **Dashboards**: overview/drift/performance/quality/operational panels (layout above)
+      linked and access granted; `/metrics` scraped by Prometheus.
+- [ ] **Alert routing**: `setup_alerts.py` config reviewed — severities map to channels
+      (critical → PagerDuty/SMS, high → Slack/email) per the Tiered Alerting table;
+      test-fired via `--action test-alert`.
+- [ ] **Thresholds**: `thresholds.json` values agreed with the model owner and recorded
+      next to the model version in the registry.
+- [ ] **Retrain criteria**: written trigger (e.g. PSI > 0.2 sustained 3 days, or primary
+      metric down > 5%) plus who approves promotion.
+- [ ] **Rollback drill**: on-call has run the alias flip once end-to-end and knows the
+      previous-champion version number.
+- [ ] **Ownership**: named owner for model, data pipeline, and serving infra; escalation
+      contacts in the alert config, ground-truth delay documented.
+
+## Managed Monitoring: SageMaker Model Monitor & Clarify
+
+For models served on SageMaker endpoints (or batch transform), Amazon SageMaker Model Monitor provides fully managed monitoring jobs. Four monitor types map to `MonitoringType` in the `CreateMonitoringSchedule` API: `DataQuality`, `ModelQuality`, `ModelBias`, and `ModelExplainability`. Prerequisite: enable data capture on the endpoint (`DataCaptureConfig`) so requests/responses land in S3.
+
+### Data Quality Monitor (baseline + schedule)
+
+```python
+# SageMaker Python SDK v3: monitor classes live in sagemaker.core.model_monitor
+from sagemaker.core.model_monitor import (
+    CronExpressionGenerator, DataCaptureConfig, DatasetFormat,
+    DefaultModelMonitor, EndpointInput,
+)
+
+monitor = DefaultModelMonitor(role=role, instance_type="ml.m5.xlarge", instance_count=1)
+
+# 1. Baseline job: profiles training data -> statistics.json + constraints.json
+monitor.suggest_baseline(
+    baseline_dataset="s3://bucket/train/train.csv",
+    dataset_format=DatasetFormat.csv(header=True),
+    output_s3_uri="s3://bucket/monitor/baseline",
+)
+
+# 2. Hourly schedule: each run compares captured traffic against the baseline
+monitor.create_monitoring_schedule(
+    monitor_schedule_name="churn-data-quality",
+    endpoint_input=EndpointInput(endpoint_name="churn-endpoint", destination="/opt/ml/processing/input"),
+    statistics=monitor.baseline_statistics(),
+    constraints=monitor.suggested_constraints(),
+    schedule_cron_expression=CronExpressionGenerator.hourly(),
+    output_s3_uri="s3://bucket/monitor/reports",
+    enable_cloudwatch_metrics=True,
+)
+```
+
+Violations (missing columns, type mismatches, distribution drift per feature) are written to `constraint_violations.json`; `ModelQualityMonitor` works the same way but joins captured predictions with ground-truth labels you upload to S3 and computes accuracy/AUC/etc. against baseline thresholds.
+
+### Clarify Bias & Explainability Monitors
+
+`ModelBiasMonitor` and `ModelExplainabilityMonitor` (same module) run SageMaker Clarify jobs on schedule: bias monitors track post-training metrics (DPPL, DI, etc.) using a `BiasConfig` (facet column, e.g. gender/age) and ground-truth labels; explainability monitors track SHAP feature-attribution drift against a baseline `SHAPConfig`. Both use `suggest_baseline(...)` then `create_monitoring_schedule(...)` like the data-quality monitor. Raw APIs if working in boto3: `create_data_quality_job_definition`, `create_model_quality_job_definition`, `create_model_bias_job_definition`, `create_model_explainability_job_definition` + `create_monitoring_schedule(MonitoringScheduleConfig={"MonitoringJobDefinitionName": ..., "MonitoringType": ..., "ScheduleConfig": {...}})`.
+
+### CloudWatch Alarm Wiring
+
+With `enable_cloudwatch_metrics=True`, each run emits per-feature metrics to the `aws/sagemaker/Endpoints/data-metrics` namespace (model-quality metrics to `.../model-metrics`). Alarm on them like any CloudWatch metric:
+
+```python
+cloudwatch.put_metric_alarm(
+    AlarmName="churn-feature-drift",
+    Namespace="aws/sagemaker/Endpoints/data-metrics",
+    MetricName="feature_baseline_drift_age",
+    Dimensions=[{"Name": "Endpoint", "Value": "churn-endpoint"},
+                {"Name": "MonitoringSchedule", "Value": "churn-data-quality"}],
+    ComparisonOperator="GreaterThanThreshold", Threshold=0.1,
+    EvaluationPeriods=1, Period=3600, Statistic="Average",
+    AlarmActions=[sns_topic_arn],  # feeds the tiered alerting channels above
+)
+```
+
+### vs Evidently (and other OSS tools)
+
+| Aspect | SageMaker Model Monitor | Evidently |
+|--------|-------------------------|-----------|
+| Scope | SageMaker endpoints / batch transform only | Any serving stack |
+| Ops burden | Fully managed jobs; pay per processing run | You host and schedule it |
+| Drift methods | Managed baseline comparison (per-feature drift check) | PSI, KS, Wasserstein, JS -- your choice per feature |
+| Bias / explainability | Built-in via Clarify | Not built-in |
+| Custom metrics | Bring-your-own container/analysis possible but heavier | Trivial (Python) |
+| Alerting | CloudWatch-native | Build your own (or Evidently Cloud) |
+
+Rule of thumb: if the model runs on a SageMaker endpoint, start with Model Monitor for managed drift/quality checks and CloudWatch alerting; add Evidently when you need custom statistical tests, richer reports, or monitoring outside SageMaker.
+
 ## Further Reading
 
 - [Evidently AI Documentation](https://docs.evidentlyai.com/)

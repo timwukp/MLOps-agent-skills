@@ -339,3 +339,8 @@ def format_alpaca(examples):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for annotation tool comparisons and format guides.
+
+## Related skills
+
+**Upstream:** `ml-solution-design` (use case, data requirements) · **Downstream:** `llm-fine-tuning` (SFT/DPO datasets) or `llm-rag` (cleaned corpus for indexing)
+**See also:** `data-validation` for quality gates on prepared datasets · `ml-security` for PII scrubbing before training

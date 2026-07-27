@@ -219,6 +219,79 @@ def predict(customer_id: int):
 
 ---
 
+## Managed: SageMaker Feature Store
+
+Amazon SageMaker Feature Store is a fully managed feature store: an online store (low-latency key-value lookups; `Standard` or `InMemory` storage) and an offline store (S3, registered as a Glue table -- `Default`/`Glue` or `Iceberg` table format) with automatic replication from online to offline. Every feature group requires a **record identifier** (entity key) and an **event time** feature -- the same two columns that drive point-in-time correctness in the diagrams above.
+
+### Create a Feature Group (boto3)
+
+```python
+sm = boto3.client("sagemaker")
+sm.create_feature_group(
+    FeatureGroupName="customer-features",
+    RecordIdentifierFeatureName="customer_id",
+    EventTimeFeatureName="event_time",
+    FeatureDefinitions=[
+        {"FeatureName": "customer_id", "FeatureType": "String"},
+        {"FeatureName": "event_time", "FeatureType": "String"},   # ISO-8601 or epoch
+        {"FeatureName": "total_purchases", "FeatureType": "Integral"},
+        {"FeatureName": "avg_order_value", "FeatureType": "Fractional"},
+    ],
+    OnlineStoreConfig={"EnableOnlineStore": True},
+    OfflineStoreConfig={"S3StorageConfig": {"S3Uri": "s3://my-bucket/feature-store/"},
+                        "TableFormat": "Iceberg"},
+    RoleArn=role_arn,
+)
+```
+
+### Ingestion and Online Reads
+
+Writes go through the `sagemaker-featurestore-runtime` client (`put_record`, `batch_write_record`); online reads use `get_record` / `batch_get_record` for serving:
+
+```python
+fs_runtime = boto3.client("sagemaker-featurestore-runtime")
+fs_runtime.put_record(
+    FeatureGroupName="customer-features",
+    Record=[{"FeatureName": "customer_id", "ValueAsString": "1001"},
+            {"FeatureName": "event_time", "ValueAsString": "2026-07-27T00:00:00Z"},
+            {"FeatureName": "total_purchases", "ValueAsString": "42"}],
+)
+rec = fs_runtime.get_record(FeatureGroupName="customer-features",
+                            RecordIdentifierValueAsString="1001")
+```
+
+The SageMaker Python SDK v3 wraps this as `FeatureGroupManager` (`sagemaker.mlops.feature_store`) with `create`, `put_record`/`batch_write_record`, `get_record`, and pandas ingestion helpers (`ingestion_manager_pandas`).
+
+### Offline Queries via Athena
+
+The offline store is queryable with standard SQL through Athena (Glue catalog table is auto-created). The SDK's `AthenaQuery` / `DatasetBuilder` (`sagemaker.mlops.feature_store`) build training sets, including point-in-time joins against an entity dataframe:
+
+```sql
+-- latest value per entity as of a cutoff (dedup on event_time)
+SELECT * FROM (
+  SELECT *, ROW_NUMBER() OVER (
+    PARTITION BY customer_id ORDER BY event_time DESC) AS rn
+  FROM "sagemaker_featurestore"."customer_features_1690000000"
+  WHERE event_time <= '2026-07-01T00:00:00Z') WHERE rn = 1;
+```
+
+### vs Feast
+
+| Aspect | SageMaker Feature Store | Feast |
+|--------|-------------------------|-------|
+| Hosting | Fully managed (AWS) | Self-hosted (open source) |
+| Online store | Managed KV (`Standard`) or `InMemory` tier | Redis, DynamoDB, Datastore -- you operate it |
+| Offline store | S3 + Glue/Iceberg, Athena SQL | BigQuery, Redshift, Snowflake, files |
+| Point-in-time joins | Via `DatasetBuilder` / Athena SQL | Native `get_historical_features` |
+| Feature definitions | API/console (imperative) | Python files in git (declarative repo) |
+| TTL / freshness | `TtlDuration` on online store | Per-feature-view `ttl` |
+| Ecosystem fit | Tight SageMaker integration (pipelines, lineage, Clarify) | Cloud-agnostic, portable |
+| Cost model | Pay per read/write/storage | Infra cost of stores you run |
+
+Choose SageMaker Feature Store when the ML platform is already SageMaker and you want zero-ops online serving with Athena-queryable history; choose Feast when you need portability across clouds, git-reviewed feature definitions, or an existing Redis/BigQuery footprint.
+
+---
+
 ## Further Reading
 
 - [Feast Documentation](https://docs.feast.dev/)

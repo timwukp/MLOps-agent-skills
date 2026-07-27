@@ -170,6 +170,29 @@ mlflow server \
 
 ---
 
+## Managed MLflow on SageMaker
+
+AWS offers fully managed MLflow: the original **MLflow Tracking Server** (`create_mlflow_tracking_server` -- sized `Small`/`Medium`/`Large`, artifacts in your S3 bucket via `ArtifactStoreUri`) and the newer serverless **MLflow Apps** (`create_mlflow_app`), which drop the instance sizing. Both run MLflow 3.x with AWS handling hosting, patching, and scaling; auth is IAM/SageMaker AI Studio instead of MLflow's DIY auth.
+
+The server/app ARN is the tracking URI -- standard MLflow client code works unchanged (install `sagemaker-mlflow` for the auth plugin):
+
+```python
+import mlflow
+
+mlflow.set_tracking_uri(
+    "arn:aws:sagemaker:us-east-1:123456789012:mlflow-tracking-server/my-server"
+)
+mlflow.set_experiment("churn_prediction")
+with mlflow.start_run():
+    mlflow.log_metric("auc", 0.87)
+```
+
+Models registered in managed MLflow can auto-register into the SageMaker Model Registry (`AutomaticModelRegistration=True` / `ModelRegistrationMode`), bridging into SageMaker Pipelines and endpoint deployment.
+
+**When to use vs self-hosted** (extends the deployment table above): choose managed MLflow when you're on AWS and want the "Remote server + DB + S3" row without operating PostgreSQL/EC2 -- especially with SageMaker Studio/Pipelines already in play. Stay self-hosted for non-AWS/multi-cloud teams, tight cost control at small scale (managed billing is per-hour/per-use), or when you need custom MLflow plugins and full version control of the server.
+
+---
+
 ## Common Pitfalls
 
 1. **Not logging everything**: Forgetting preprocessing steps or data splits leads to irreproducible results.

@@ -14,7 +14,8 @@ Covers drift types, statistical tests, detection strategies, tooling, and retrai
 5. [Drift Detection Tools Comparison](#5-drift-detection-tools-comparison)
 6. [Retraining Strategies](#6-retraining-strategies)
 7. [False Positive Management](#7-false-positive-management)
-8. [Further Reading](#8-further-reading)
+8. [SageMaker Model Monitor for Drift](#8-sagemaker-model-monitor-for-drift)
+9. [Further Reading](#9-further-reading)
 
 ---
 
@@ -318,7 +319,26 @@ Drift detection in production generates false alarms. Managing them is critical 
 
 ---
 
-## 8. Further Reading
+## 8. SageMaker Model Monitor for Drift
+
+For models on SageMaker endpoints, Amazon SageMaker Model Monitor provides managed drift detection: a baseline job profiles your training data (`suggest_baseline`), then scheduled processing jobs compare captured endpoint traffic against the baseline and emit per-feature drift metrics to CloudWatch (`feature_baseline_drift_<name>`). Setup, code, and CloudWatch alarm wiring are documented in the **model-monitoring** skill (see its "Managed Monitoring: SageMaker Model Monitor & Clarify" section).
+
+### What it does and doesn't cover vs. the methods in this skill
+
+| Capability | Model Monitor | This skill's methods |
+|-----------|---------------|----------------------|
+| **Data drift** (feature distributions) | Yes -- managed per-feature baseline comparison; distance metric configurable only coarsely (e.g. categorical drift method) | Full control: PSI, KS, Wasserstein, JS, Chi-squared, MMD per feature (Section 2) |
+| **Prediction drift** | Indirect (monitor the output as a captured field) | Direct -- compare prediction distributions with any test |
+| **Concept drift** (P(Y\|X) change) | Via Model Quality monitor, but only after ground-truth labels arrive | Same limitation, plus label-free estimation via NannyML CBPE (Section 5) |
+| **Multivariate drift** | No -- univariate per-feature checks only | MMD, classifier-based, PCA-reconstruction methods |
+| **Window strategies** | Fixed schedule windows (hourly/daily) | Sliding/tumbling/adaptive windows, ADWIN, Page-Hinkley (Section 3) |
+| **False-positive controls** | Threshold per feature in constraints file | Multiple-testing correction, confirmation windows, severity scoring (Section 7) |
+
+Practical guidance: Model Monitor is a good managed first line for endpoint-hosted models -- zero-maintenance scheduled checks with CloudWatch alarms. When you need a specific statistical test (e.g. PSI for regulator-facing credit models), multivariate detection, streaming windows, or drift detection off-AWS, apply the methods in Sections 2-3 with Evidently/Alibi Detect/River, optionally alongside Model Monitor.
+
+---
+
+## 9. Further Reading
 
 ### Official Documentation
 

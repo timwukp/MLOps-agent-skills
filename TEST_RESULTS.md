@@ -151,3 +151,25 @@ All 25 skills were deep-reviewed for technical accuracy (5 parallel review passe
   gotcha discovered during validation is now documented in the model-serving reference.
 
 Post-fix test status: schema validation 25/25, script tests 48 pass / 2 skipped, py_compile clean.
+
+---
+
+## Update 2026-07-27: Delivery framework
+
+The skill set was extended from 25 to 27 skills and cross-linked into a single delivery
+framework:
+
+- **2 new skills**: `ml-solution-design` (requirements intake, architecture decisions —
+  including managed SageMaker/Bedrock vs self-hosted trade-offs — reference architectures,
+  proposals) and `ml-cicd` (model CI with GitHub Actions OIDC-to-AWS, SageMaker Pipelines as
+  managed CD, promotion, rollback), each with 2 tested scripts and a REFERENCE.md.
+- **Cross-linking**: every SKILL.md (27/27) now ends with a "Related skills" section naming
+  its upstream/downstream neighbors in the MLOps or LLMOps lifecycle chain plus cross-cutting
+  companions; the training → registry → serving → monitoring handoff references
+  `skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md`. All files remain under the
+  500-line cap (max: ml-security at 499).
+- **README**: skills tables updated to 27 (MLOps 17 / LLMOps 10) and a new "Delivery
+  Lifecycle" section shows both chains as ASCII flows with cross-cutting skills and bridges.
+
+Post-update test status: schema validation 27/27 + README cross-check OK, script tests
+53 pass / 0 fail / 2 skipped (55 scripts total), py_compile clean.

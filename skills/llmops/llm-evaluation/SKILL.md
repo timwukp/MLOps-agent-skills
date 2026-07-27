@@ -295,3 +295,8 @@ class LLMEvaluator:
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for benchmark details and tool comparisons.
+
+## Related skills
+
+**Upstream:** `llm-fine-tuning` or `llm-rag` (candidate model/pipeline) · **Downstream:** `llm-deployment` (only evaluated candidates ship)
+**See also:** `ml-testing` for CI gating patterns · `llm-guardrails` for the safety-evaluation overlap · `llm-observability` for production samples to regression-test against

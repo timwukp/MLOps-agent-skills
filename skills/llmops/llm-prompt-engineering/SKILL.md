@@ -295,3 +295,9 @@ def build_conversation_prompt(system_prompt, history, user_message, max_history=
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for pattern catalog and examples.
+
+## Related skills
+
+**Cross-cutting:** prompts touch every LLMOps stage, from `llm-rag` generation to `llm-agent-orchestration` system prompts
+**Upstream:** `ml-solution-design` (task definition) · **Downstream:** `llm-evaluation` (prompt variants to compare)
+**See also:** `llm-guardrails` for injection defense · `llm-cost-optimization` for prompt compression
