@@ -48,57 +48,112 @@ Compatible with: **Claude Code**, **Kiro CLI/IDE**, **Cursor**, **VS Code Copilo
 
 ## Delivery Lifecycle
 
-The skills compose into two end-to-end delivery chains. Each SKILL.md ends with a
-"Related skills" section that names its upstream and downstream neighbors.
+The skills compose into two end-to-end delivery chains — **every node below is clickable**
+and jumps to that skill's `SKILL.md`. Each SKILL.md also ends with a "Related skills"
+section naming its upstream and downstream neighbors.
 
 ### MLOps chain
 
-```
-ml-solution-design → data-ingestion → data-validation → feature-engineering
-        │                                                      │
-        │                                              (feature-store)
-        │                                                      │
-        └──────────────────────────────────────────► model-training ◄─────────┐
-                                                           │                  │
-                                          ml-experiment-tracking (parallel)   │
-                                                           │                  │
-                                                     model-registry           │ retraining
-                                                           │                  │ trigger
-                                                        ml-cicd               │
-                                                           │                  │
-                                                     model-serving            │
-                                                           │                  │
-                                                    model-monitoring          │
-                                                           │                  │
-                                                 model-drift-detection ───────┘
+```mermaid
+flowchart TD
+    SD(["🎯 ml-solution-design"]) --> DI["📥 data-ingestion"]
+    DI --> DV["✅ data-validation"]
+    DV --> FE["🧪 feature-engineering"]
+    FE --> FS[("🗄️ feature-store")]
+    FE --> MT["🏋️ model-training"]
+    FS -.-> MT
+    ET["📊 ml-experiment-tracking"] -.parallel.- MT
+    MT --> MR["📦 model-registry"]
+    MR --> CI["🚀 ml-cicd"]
+    CI --> MS["🌐 model-serving"]
+    MS --> MM["📈 model-monitoring"]
+    MM --> DD["🌊 model-drift-detection"]
+    DD -->|retraining trigger| MT
+
+    click SD "skills/mlops/ml-solution-design/SKILL.md" "Requirements intake & architecture decisions"
+    click DI "skills/mlops/data-ingestion/SKILL.md" "Batch/streaming ingestion"
+    click DV "skills/mlops/data-validation/SKILL.md" "Great Expectations, Pandera, contracts"
+    click FE "skills/mlops/feature-engineering/SKILL.md" "Transformations, encoding, selection"
+    click FS "skills/mlops/feature-store/SKILL.md" "Feast, online/offline stores"
+    click MT "skills/mlops/model-training/SKILL.md" "HPO, distributed training"
+    click ET "skills/mlops/ml-experiment-tracking/SKILL.md" "MLflow, W&B"
+    click MR "skills/mlops/model-registry/SKILL.md" "Versioning, aliases, promotion"
+    click CI "skills/mlops/ml-cicd/SKILL.md" "Model CI, GitHub Actions, SageMaker Pipelines"
+    click MS "skills/mlops/model-serving/SKILL.md" "FastAPI, BentoML, SageMaker endpoints"
+    click MM "skills/mlops/model-monitoring/SKILL.md" "Evidently, Model Monitor, runbooks"
+    click DD "skills/mlops/model-drift-detection/SKILL.md" "PSI, KS test, retraining triggers"
+
+    classDef design fill:#7c5cff,stroke:#5a3fd6,color:#ffffff
+    classDef data fill:#0ea5e9,stroke:#0284c7,color:#ffffff
+    classDef train fill:#f59e0b,stroke:#d97706,color:#1a1a1a
+    classDef deploy fill:#10b981,stroke:#059669,color:#ffffff
+    classDef ops fill:#ef4444,stroke:#dc2626,color:#ffffff
+    class SD design
+    class DI,DV,FE,FS data
+    class MT,ET,MR train
+    class CI,MS deploy
+    class MM,DD ops
 ```
 
-Cross-cutting: `ml-testing` (quality gates inside `ml-cicd`), `ml-security` (all stages),
-`ml-cost-optimization` (design-time sizing + operational right-sizing),
-`ml-pipeline-orchestration` (automates the chain as DAGs), `model-observability`
-(explainability companion to serving + monitoring). The training → registry → serving →
-monitoring handoff is specified in
-[`skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md`](skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md).
+**Cross-cutting** (apply at every stage):
+[`ml-testing`](skills/mlops/ml-testing/SKILL.md) quality gates inside ml-cicd ·
+[`ml-security`](skills/mlops/ml-security/SKILL.md) adversarial robustness, privacy, compliance ·
+[`ml-cost-optimization`](skills/mlops/ml-cost-optimization/SKILL.md) design-time sizing + operational right-sizing ·
+[`ml-pipeline-orchestration`](skills/mlops/ml-pipeline-orchestration/SKILL.md) automates the chain as DAGs ·
+[`model-observability`](skills/mlops/model-observability/SKILL.md) explainability companion to serving + monitoring
+
+The training → registry → serving → monitoring handoff is specified in
+[`ARTIFACT_CONTRACT.md`](skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md).
 
 ### LLMOps chain
 
-```
-ml-solution-design → llm-data-preparation ─┬─► llm-fine-tuning ─┬─► llm-evaluation
-                                           └─► llm-rag ─────────┘        │
-                                                                   llm-deployment
-                                                                          │
-                                            llm-agent-orchestration (app layer)
-                                                                          │
-                                                                   llm-guardrails
-                                                                          │
-                                                                 llm-observability
-                                                                          │
-                                                              llm-cost-optimization
+```mermaid
+flowchart TD
+    SD(["🎯 ml-solution-design"]) --> DP["🧹 llm-data-preparation"]
+    DP --> FT["🎛️ llm-fine-tuning"]
+    DP --> RAG["🔍 llm-rag"]
+    FT --> EV["🧾 llm-evaluation"]
+    RAG --> EV
+    EV --> DEP["🌐 llm-deployment"]
+    DEP --> AO["🤖 llm-agent-orchestration"]
+    DEP --> GR["🛡️ llm-guardrails"]
+    AO --> GR
+    GR --> OBS["📈 llm-observability"]
+    OBS --> CO["💰 llm-cost-optimization"]
+    CO -.optimization loop.-> DEP
+
+    click SD "skills/mlops/ml-solution-design/SKILL.md" "Requirements intake & architecture decisions"
+    click DP "skills/llmops/llm-data-preparation/SKILL.md" "Synthetic data, dedup, quality"
+    click FT "skills/llmops/llm-fine-tuning/SKILL.md" "LoRA, QLoRA, DPO"
+    click RAG "skills/llmops/llm-rag/SKILL.md" "Chunking, embeddings, hybrid search"
+    click EV "skills/llmops/llm-evaluation/SKILL.md" "RAGAS, LLM-as-judge, safety"
+    click DEP "skills/llmops/llm-deployment/SKILL.md" "vLLM, Bedrock, quantization"
+    click AO "skills/llmops/llm-agent-orchestration/SKILL.md" "Tool use, LangGraph, multi-agent"
+    click GR "skills/llmops/llm-guardrails/SKILL.md" "PII, jailbreak prevention, Bedrock Guardrails"
+    click OBS "skills/llmops/llm-observability/SKILL.md" "Token tracking, latency, tracing"
+    click CO "skills/llmops/llm-cost-optimization/SKILL.md" "Model routing, caching, batch API"
+
+    classDef design fill:#7c5cff,stroke:#5a3fd6,color:#ffffff
+    classDef data fill:#0ea5e9,stroke:#0284c7,color:#ffffff
+    classDef train fill:#f59e0b,stroke:#d97706,color:#1a1a1a
+    classDef deploy fill:#10b981,stroke:#059669,color:#ffffff
+    classDef ops fill:#ef4444,stroke:#dc2626,color:#ffffff
+    class SD design
+    class DP data
+    class FT,RAG,EV train
+    class DEP,AO deploy
+    class GR,OBS,CO ops
 ```
 
-Cross-cutting: `llm-prompt-engineering` (every stage from RAG generation to agent system
-prompts). Bridges: fine-tuned LLMs flow through `model-registry` / `model-serving` /
-`model-monitoring` like any other model artifact.
+**Cross-cutting**: [`llm-prompt-engineering`](skills/llmops/llm-prompt-engineering/SKILL.md)
+(every stage from RAG generation to agent system prompts).
+**Bridges to classic MLOps**: fine-tuned LLMs flow through
+[`model-registry`](skills/mlops/model-registry/SKILL.md) /
+[`model-serving`](skills/mlops/model-serving/SKILL.md) /
+[`model-monitoring`](skills/mlops/model-monitoring/SKILL.md) like any other model.
+
+<sub>Legend: 🟣 design · 🔵 data · 🟠 train/evaluate · 🟢 deploy · 🔴 operate — node
+click-through works on github.com (Mermaid); the inline links above are the fallback.</sub>
 
 ## Installation
 
