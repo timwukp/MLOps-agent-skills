@@ -276,3 +276,8 @@ def validate_training_data(dataset):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for method comparisons and guides.
+
+## Related skills
+
+**Upstream:** `llm-data-preparation` (curated SFT/preference datasets) · **Downstream:** `llm-evaluation` (tuned checkpoint or adapter to evaluate)
+**See also:** `model-registry` — register adapters/checkpoints like any model artifact · `ml-cost-optimization` for GPU sizing · `llm-deployment` once evaluation clears

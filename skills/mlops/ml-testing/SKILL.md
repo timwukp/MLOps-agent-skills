@@ -285,3 +285,8 @@ class TestTrainingPipeline:
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for testing strategies by model type.
+
+## Related skills
+
+**Upstream:** `model-training` (candidate models) and `data-validation` (data contracts to enforce) · **Downstream:** `ml-cicd` (these tests are the gates that block or allow promotion)
+**See also:** `llm-evaluation` for the LLM equivalent · `model-monitoring` for post-deploy verification

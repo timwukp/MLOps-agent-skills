@@ -1,15 +1,15 @@
 ---
 name: ml-security
 description: >
-  ML security skill covering model security, adversarial attacks, adversarial robustness testing,
-  data poisoning detection, model extraction defense, model inversion prevention, differential
-  privacy (Opacus, TensorFlow Privacy), federated learning security, secure ML pipelines, model
-  encryption, access control and RBAC for models, model signing and verification, supply chain
-  security for ML artifacts, input validation for ML APIs, audit logging, PII detection, data
-  anonymization, OWASP ML Top 10, MITRE ATLAS threat framework, secret management, secure model
-  serving with TLS and authentication, rate limiting, dependency vulnerability scanning, model
-  provenance tracking, fairness and bias auditing as security concerns, and compliance-driven
-  secure data handling for production machine learning systems.
+  Secure ML systems and meet compliance requirements. Covers adversarial attacks and robustness testing,
+  data poisoning detection, model extraction and inversion defense, differential privacy (Opacus,
+  TensorFlow Privacy), federated learning security, model encryption, signing and verification, supply
+  chain security for ML artifacts, input validation for ML APIs, audit logging, PII detection, data
+  anonymization, OWASP ML Top 10, MITRE ATLAS, secret management, secure serving with TLS and
+  authentication, rate limiting, dependency scanning, and fairness auditing. Use when securing models or
+  ML pipelines, scanning artifacts, detecting or anonymizing PII, threat-modeling an ML system, or
+  handling compliance and privacy requirements such as GDPR, CCPA, HIPAA, DPIA, data residency, or
+  audit obligations.
 license: Apache-2.0
 metadata:
   author: mlops-skills
@@ -492,3 +492,8 @@ These topics are documented in [REFERENCE.md](references/REFERENCE.md) sections 
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for OWASP ML Top 10 detailed guide, MITRE ATLAS attack catalog, adversarial robustness tools comparison, differential privacy parameter selection, ML security checklist, compliance requirements (GDPR, CCPA, HIPAA), and deep-dive attack/defense patterns for data poisoning, model extraction, model inversion, federated learning, artifact signing, supply chain security, secret management, audit logging, fairness/bias, secure data handling, and vulnerability scanning.
+
+## Related skills
+
+**Cross-cutting:** applies at every stage — data poisoning (`data-ingestion`), artifact integrity (`model-registry`), endpoint hardening (`model-serving`)
+**See also:** `llm-guardrails` for LLM-specific defenses · `ml-solution-design` for compliance intake

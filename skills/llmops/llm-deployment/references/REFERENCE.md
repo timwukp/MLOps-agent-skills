@@ -155,6 +155,84 @@ Self-hosting becomes cost-effective when: token volume exceeds 50-100M/month for
 
 GPU provisioning, model updates, monitoring infrastructure, on-call engineering, networking/storage costs, and idle GPU cost during low-traffic periods.
 
+## Managed LLM Serving: Amazon Bedrock
+
+Amazon Bedrock is a fully managed, serverless API over foundation models (Anthropic Claude, Meta Llama, Amazon Nova, Mistral, and others). No GPUs to size, no engine to tune -- you pay per token.
+
+### Bedrock vs Self-Hosted vLLM
+
+| Dimension | Bedrock (managed) | Self-hosted vLLM |
+|-----------|-------------------|------------------|
+| Ops burden | None (serverless API) | GPU fleet, engine upgrades, autoscaling, on-call |
+| Cost model | Per-token (on-demand) or per-model-unit (provisioned) | Per-GPU-hour, regardless of utilization |
+| Break-even | Cheapest at low/spiky volume | Wins at sustained high volume + >50% GPU utilization (see table above) |
+| Model choice | Catalog models only (Claude, Llama, Nova, Mistral...) | Any open-weight model, any fine-tune, any quantization |
+| Customization | Fine-tuning/distillation for select models; no engine control | Full control: LoRA adapters, speculative decoding, custom kernels |
+| Data residency / compliance | Region-pinned or cross-region profiles; no training on your data | Fully in your VPC/on-prem |
+| Latency control | Shared capacity (on-demand) unless provisioned | You own the latency profile |
+
+### Converse API (boto3)
+
+The Converse API is Bedrock's unified chat interface -- same request shape across model providers, with streaming via `converse_stream`:
+
+```python
+import boto3
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+response = bedrock.converse(
+    modelId="global.anthropic.claude-sonnet-5",   # global inference profile
+    system=[{"text": "You are a concise assistant."}],
+    messages=[{"role": "user", "content": [{"text": "Summarize PagedAttention in 2 sentences."}]}],
+    inferenceConfig={"maxTokens": 512, "temperature": 0.3},
+)
+print(response["output"]["message"]["content"][0]["text"])
+print(response["usage"])  # inputTokens / outputTokens for cost tracking
+
+# Streaming
+stream = bedrock.converse_stream(
+    modelId="global.anthropic.claude-sonnet-5",
+    messages=[{"role": "user", "content": [{"text": "Explain KV cache."}]}],
+)
+for event in stream["stream"]:
+    if "contentBlockDelta" in event:
+        print(event["contentBlockDelta"]["delta"].get("text", ""), end="")
+```
+
+`converse` also accepts `toolConfig` (function calling) and `guardrailConfig` (see the llm-guardrails skill for Bedrock Guardrails).
+
+### Inference Profiles and Cross-Region
+
+Current models are invoked through **inference profiles** rather than bare model IDs. The prefix selects the routing scope:
+
+| Prefix | Example | Routing |
+|--------|---------|---------|
+| `global.` | `global.anthropic.claude-sonnet-5` | Routes across all commercial regions for maximum availability |
+| `us.` / `eu.` / `apac.` | `us.anthropic.claude-sonnet-5` | Cross-region within a geography (data stays in-geo) |
+| none (bare ID) | `anthropic.claude-haiku-4-5` | Single region (older models; many newer ones require a profile) |
+
+Pick geo-scoped profiles (`us.`/`eu.`) when data residency matters; `global.` for best throughput/availability. Application inference profiles (created via `bedrock.create_inference_profile`) add per-workload cost tagging.
+
+### On-Demand vs Provisioned Throughput
+
+- **On-demand**: pay per token, shared capacity, subject to account-level TPM/RPM quotas. Default choice.
+- **Provisioned throughput**: `bedrock.create_provisioned_model_throughput(modelUnits=N, modelId=..., commitmentDuration="OneMonth"|"SixMonths")` buys dedicated model units for guaranteed throughput and steadier latency. Required for using custom (fine-tuned) models; economical only at consistently high utilization. No-commitment hourly provisioned capacity is also available for testing.
+- **Batch inference**: asynchronous jobs at ~50% of on-demand token price for non-latency-sensitive workloads.
+
+### Pricing Snapshot (Anthropic models, per 1M tokens, mid-2026)
+
+| Model | Input | Output |
+|-------|-------|--------|
+| claude-opus-5 | $5.00 | $25.00 |
+| claude-sonnet-5 | $3.00 | $15.00 |
+| claude-haiku-4-5 | $1.00 | $5.00 |
+
+These are the Anthropic first-party rates; Bedrock is partner-operated and its pricing may vary slightly -- confirm at the [Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/).
+
+### Open-Weight Models on AWS: SageMaker JumpStart / Endpoints
+
+If you must self-host an open-weight model (Llama, Mistral, Qwen) on AWS -- e.g. for a custom fine-tune Bedrock doesn't serve -- SageMaker JumpStart deploys them to managed GPU endpoints in a few calls (containers typically run vLLM or TGI via the Large Model Inference images). You still pay per-GPU-hour, but AWS manages provisioning, autoscaling, and health checks; the hardware sizing guidance above applies to instance selection (e.g. `ml.g5.12xlarge` for a 70B 4-bit model). This sits between Bedrock (no infra) and raw vLLM on EC2/EKS (full control).
+
 ## Further Reading
 
 - [vLLM Documentation](https://docs.vllm.ai/)

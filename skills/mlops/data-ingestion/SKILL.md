@@ -2,10 +2,12 @@
 name: data-ingestion
 description: >
   Design and implement data ingestion pipelines for ML workflows. Covers batch ingestion from CSV, Parquet, JSON, Avro,
-  databases (PostgreSQL, MySQL, BigQuery), and cloud storage (S3, GCS, Azure Blob). Streaming ingestion with Kafka,
-  Kinesis, Pulsar, and Flink. ETL/ELT pipeline design, data lake ingestion (Delta Lake, Iceberg, Hudi), schema evolution,
+  databases (PostgreSQL, MySQL, BigQuery), and cloud storage (S3, GCS, Azure Blob), streaming ingestion with Kafka,
+  Kinesis, Pulsar, and Flink, ETL/ELT pipeline design, data lake ingestion (Delta Lake, Iceberg, Hudi), schema evolution,
   data versioning with DVC and LakeFS, data catalog integration, incremental loading, partitioning, compression,
-  error handling, retry logic, dead letter queues, idempotency, and exactly-once semantics for ML data pipelines.
+  error handling, retry logic, dead letter queues, idempotency, and exactly-once semantics. Use when building or
+  debugging data ingestion pipelines, connecting ML systems to data sources, moving data into a lake or feature
+  pipeline, setting up streaming ingestion, or versioning training data.
 license: Apache-2.0
 metadata:
   author: mlops-skills
@@ -332,3 +334,8 @@ See [references/REFERENCE.md](references/REFERENCE.md) for:
 - Tool comparison (Airbyte, Meltano, dlt, Singer, NiFi)
 - Format benchmarks
 - Connection patterns for 10+ data sources
+
+## Related skills
+
+**Upstream:** `ml-solution-design` (approved architecture and data-source inventory) · **Downstream:** `data-validation` (landed raw data to check before use)
+**See also:** `ml-pipeline-orchestration` for scheduling and retrying ingestion jobs · `ml-security` for PII handling at the point of entry

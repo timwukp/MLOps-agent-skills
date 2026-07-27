@@ -271,3 +271,8 @@ def validate_schema_evolution(current_schema, new_schema):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for tool comparisons and patterns.
+
+## Related skills
+
+**Upstream:** `data-ingestion` (landed raw data) · **Downstream:** `feature-engineering` (validated, contract-conformant data)
+**See also:** `ml-testing` for wiring data checks into CI gates · `model-drift-detection` for the production-time counterpart of these checks

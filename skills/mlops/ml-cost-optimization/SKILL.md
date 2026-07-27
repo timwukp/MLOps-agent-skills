@@ -1,6 +1,13 @@
 ---
 name: ml-cost-optimization
-description: "ML cost optimization skill covering GPU cost analysis, training cost reduction, inference cost optimization, spot instance strategies, model compression (quantization, pruning, knowledge distillation), mixed precision training, gradient accumulation, resource right-sizing, compute management, auto-scaling, scale-to-zero, batch inference, ONNX Runtime, storage tiering, artifact lifecycle, data processing efficiency, cost tracking dashboards, FinOps for ML, cost-aware experiment design, shared compute scheduling with Slurm and Kubernetes, and cloud vs on-prem cost comparison."
+description: >
+  Optimize and estimate ML infrastructure costs. Covers GPU selection and pricing (T4 through H200), training cost
+  estimation and reduction, inference cost optimization, spot instance strategies, model compression (quantization,
+  pruning, knowledge distillation), mixed precision, gradient accumulation, resource right-sizing, auto-scaling,
+  scale-to-zero, batch inference, ONNX Runtime, storage tiering, cost tracking, FinOps for ML, LLM API cost sizing,
+  and cloud vs on-prem comparison. Use when estimating or reducing ML costs, choosing a GPU or instance type,
+  sizing a training/inference/LLM workload budget, analyzing experiment spend, or answering "how much will this
+  model cost to train or serve".
 license: Apache-2.0
 metadata:
   author: mlops-skills
@@ -466,25 +473,16 @@ See `references/REFERENCE.md` for the full phase-by-phase checklist with 70+ ite
 ## Scripts
 
 - **`scripts/cost_analyzer.py`**: Analyze and estimate ML training and inference costs, including GPU cost comparison, spot instance savings calculation, and experiment cost projection.
+- **`scripts/cost_estimator.py`**: Pre-sales monthly cost sizing for training, inference (by hours or by traffic + latency budget), and LLM API workloads, with stated assumptions; shares the GPU pricing table with `cost_analyzer.py`.
 - **`scripts/model_compress.py`**: Model compression utilities including quantization (dynamic, static, QAT), pruning (unstructured, structured, iterative), and benchmarking. The CLI subcommands load a state_dict into a built-in demo architecture selected by `--arch` (`mlp` | `cnn` | `transformer_block`); import the functions directly for your own model classes. Note that `compare` reads two FP32 state_dicts of the same architecture, so it cannot load the packed-INT8 output of `quantize` — benchmark quantized models in-process with `compare_models()`.
 
 ---
 
 ## References
 
-- **`references/REFERENCE.md`**: Comprehensive reference covering:
-  - Detailed GPU pricing tables (per-cloud provider)
-  - GPU memory requirements by model size
-  - Quantization, pruning, and distillation method comparison tables
-  - Cost estimation formulas (training, inference, spot savings, TCO)
-  - FinOps maturity model for ML teams (3 levels with metrics)
-  - Full cost optimization checklist (7 phases, 70+ items)
-  - Cloud provider cost comparison (compute, storage, managed platforms)
-  - Cloud vs on-prem vs hybrid decision guide
-  - Storage cost optimization (tiered storage, artifact lifecycle, smart checkpointing)
-  - Data processing optimization (sampling, caching, efficient loading)
-  - Cost tracking and budgeting (tagging, CostTracker, BudgetGuard)
-  - Cost-aware experiment design (budgeting, prioritization)
-  - Resource right-sizing (GPU monitoring, decision matrix)
-  - Shared compute scheduling (Kubernetes, Slurm)
-  - Monthly cost benchmarks by workload type
+- **`references/REFERENCE.md`**: Detailed per-cloud GPU pricing tables and GPU memory requirements by model size; quantization/pruning/distillation comparison tables; cost estimation formulas (training, inference, spot savings, TCO); FinOps maturity model (3 levels with metrics); full 7-phase, 70+-item optimization checklist; cloud provider cost comparison and cloud vs on-prem vs hybrid decision guide; storage and data processing optimization; cost tracking and budgeting (tagging, CostTracker, BudgetGuard); cost-aware experiment design; resource right-sizing; shared compute scheduling (Kubernetes, Slurm); and monthly cost benchmarks by workload type.
+
+## Related skills
+
+**Cross-cutting:** cost levers at design time (`ml-solution-design` budget sizing) and in operation (`model-training` spot/precision, `model-serving` right-sizing)
+**See also:** `llm-cost-optimization` for LLM-specific levers (routing, caching, compression) · `model-monitoring` for the utilization data that drives right-sizing

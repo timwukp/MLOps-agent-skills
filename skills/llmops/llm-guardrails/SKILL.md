@@ -289,3 +289,8 @@ class GuardrailPipeline:
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for tool comparisons and safety benchmarks.
+
+## Related skills
+
+**Upstream:** `llm-deployment` (live endpoint to protect) · **Downstream:** `llm-observability` (violation events to log and alert on)
+**See also:** `llm-prompt-engineering` for injection-resistant prompt design · `ml-security` for the broader ML threat model

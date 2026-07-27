@@ -355,3 +355,8 @@ with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for framework comparisons and tuning guides.
+
+## Related skills
+
+**Upstream:** `feature-engineering` / `feature-store` (training-ready data) · **Downstream:** `model-registry` — package the artifact per the contract at `skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md`
+**See also:** `ml-experiment-tracking` runs in parallel with every training job · `ml-cost-optimization` for GPU choice, spot, and mixed precision · retraining triggers arrive from `model-drift-detection`

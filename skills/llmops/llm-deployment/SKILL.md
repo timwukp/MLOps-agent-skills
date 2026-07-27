@@ -267,3 +267,8 @@ async def chat_stream(request: ChatRequest):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for framework comparisons and deployment patterns.
+
+## Related skills
+
+**Upstream:** `llm-evaluation` (cleared candidate) · **Downstream:** `llm-guardrails` (wrap the live endpoint) and `llm-observability` (traces, token metrics)
+**See also:** `model-serving` for classic-ML serving patterns that carry over · `llm-agent-orchestration` builds the application layer on top of this endpoint

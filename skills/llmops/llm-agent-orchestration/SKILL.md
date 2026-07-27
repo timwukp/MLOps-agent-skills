@@ -348,3 +348,8 @@ class HumanInTheLoopAgent:
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for framework comparisons.
+
+## Related skills
+
+**Upstream:** `llm-deployment` (the model endpoint agents call — this skill is the application layer on top) · **Downstream:** `llm-observability` (agent/tool traces) and `llm-guardrails` (tool-use safety)
+**See also:** `llm-prompt-engineering` for system prompts and tool descriptions · `llm-evaluation` for end-to-end agent evals

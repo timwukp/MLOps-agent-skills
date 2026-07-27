@@ -345,3 +345,8 @@ class BatchPredictor:
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for framework comparisons and K8s manifests.
+
+## Related skills
+
+**Upstream:** `ml-cicd` (deploy pipeline) delivering a `model-registry` artifact packaged per `skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md` · **Downstream:** `model-monitoring` (prediction logs, latency and error metrics)
+**See also:** `feature-store` for online feature lookups at request time · `llm-deployment` for LLM-specific serving stacks

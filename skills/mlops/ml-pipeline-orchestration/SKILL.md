@@ -1,6 +1,12 @@
 ---
 name: ml-pipeline-orchestration
-description: "ML pipeline orchestration skill covering end-to-end workflow automation with Apache Airflow DAGs, Kubeflow Pipelines, Prefect flows, Dagster ops and assets, ZenML abstractions, and Argo Workflows. Includes pipeline scheduling (cron, event-driven, data-driven triggers), task dependency management, fan-out/fan-in patterns, parameter passing via XComs and artifacts, pipeline retry and error handling, pipeline monitoring and alerting, dynamic conditional branching, pipeline caching, artifact reuse, pipeline versioning, reproducibility, CI/CD integration, reusable pipeline templates, and orchestrator migration strategies for production ML workflow automation."
+description: >
+  Automate end-to-end ML workflows with Apache Airflow DAGs, Kubeflow Pipelines, Prefect flows, Dagster ops and
+  assets, ZenML, and Argo Workflows. Covers pipeline scheduling (cron, event-driven, data-driven triggers), task
+  dependency management, fan-out/fan-in patterns, parameter passing via XComs and artifacts, retry and error
+  handling, pipeline monitoring and alerting, conditional branching, caching, artifact reuse, pipeline versioning,
+  reproducibility, and CI/CD integration. Use when building or scheduling ML pipelines, wiring training/evaluation/
+  deployment steps into a DAG, choosing or migrating between orchestrators, or debugging pipeline failures and retries.
 license: Apache-2.0
 metadata:
   author: mlops-skills
@@ -479,3 +485,9 @@ Verify metric names against your Airflow version before shipping alerts —
 ## References
 
 - **`references/REFERENCE.md`** - Detailed orchestrator comparisons, framework-specific deep dives (Kubeflow, Prefect, Dagster, ZenML), design pattern catalog, parameter passing, versioning, dynamic pipelines, caching, environment management, templates, CI/CD, testing strategies, migration guides, production checklist, and troubleshooting.
+
+## Related skills
+
+**Cross-cutting:** automates the whole MLOps chain — `data-ingestion` → `data-validation` → `feature-engineering` → `model-training` → `model-registry` as DAG steps
+**Upstream:** `ml-solution-design` (pipeline architecture decision) · **Downstream:** `ml-cicd` (pipeline definitions are themselves versioned and deployed via CI)
+**See also:** `ml-experiment-tracking` for logging from inside pipeline runs

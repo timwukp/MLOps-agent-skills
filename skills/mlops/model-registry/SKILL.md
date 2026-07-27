@@ -289,3 +289,8 @@ def rollback_model(model_name, target_version=None):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for tool and format comparisons.
+
+## Related skills
+
+**Upstream:** `model-training` + `ml-experiment-tracking` (candidate artifact with lineage) · **Downstream:** `ml-cicd` (a registered/approved version triggers the promotion pipeline)
+**See also:** `references/ARTIFACT_CONTRACT.md` (in this skill) defines what training must hand over and what serving/monitoring may assume · applies equally to fine-tuned LLMs from `llm-fine-tuning`

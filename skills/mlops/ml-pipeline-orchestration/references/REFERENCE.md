@@ -25,6 +25,7 @@ Detailed reference material for ML pipeline orchestration, including framework c
 17. [Pipeline Templates and Reusable Components](#17-pipeline-templates-and-reusable-components)
 18. [CI/CD for Pipeline Code](#18-cicd-for-pipeline-code)
 19. [Pipeline Migration Code Patterns](#19-pipeline-migration-code-patterns)
+20. [Managed Orchestration: SageMaker Pipelines & Step Functions](#20-managed-orchestration-sagemaker-pipelines--step-functions)
 
 ---
 
@@ -2177,3 +2178,122 @@ def training():
 | Airflow -> Kubeflow | Replace operators with KFP components, DAGs with pipeline DSL, connections with K8s secrets |
 | Prefect -> Dagster | Replace flows with jobs, tasks with ops/assets, blocks with resources |
 | Any -> ZenML | Wrap step logic in `@step`, wire in `@pipeline`, configure stack for target infra |
+
+---
+
+## 20. Managed Orchestration: SageMaker Pipelines & Step Functions
+
+### 20.1 SageMaker Pipelines (SDK v3)
+
+SageMaker Pipelines is AWS's serverless ML-native orchestrator: pipeline definitions
+are compiled to JSON and executed by the SageMaker service (no scheduler to host).
+In SageMaker Python SDK v3 (`sagemaker>=3.0`), the legacy `Estimator`/`Model`/`Predictor`
+classes were removed -- training steps take `step_args` from `ModelTrainer.train()`
+(`sagemaker.train`) and registration steps from `ModelBuilder.register()` (`sagemaker.serve`).
+Workflow classes live under `sagemaker.mlops.workflow` (steps, pipeline) and
+`sagemaker.core.workflow` (conditions, parameters, functions).
+
+```python
+# SageMaker SDK v3 -- training + quality gate + conditional registration
+from sagemaker.core.workflow.pipeline_context import PipelineSession
+from sagemaker.core.workflow.conditions import ConditionGreaterThanOrEqualTo
+from sagemaker.core.workflow.functions import JsonGet
+from sagemaker.core.workflow.parameters import ParameterFloat
+from sagemaker.core.workflow.properties import PropertyFile
+from sagemaker.mlops.workflow.condition_step import ConditionStep
+from sagemaker.mlops.workflow.fail_step import FailStep
+from sagemaker.mlops.workflow.model_step import ModelStep
+from sagemaker.mlops.workflow.pipeline import Pipeline
+from sagemaker.mlops.workflow.steps import TrainingStep, ProcessingStep
+from sagemaker.serve import ModelBuilder
+from sagemaker.train import ModelTrainer
+from sagemaker.train.configs import SourceCode
+
+session = PipelineSession()
+min_auc = ParameterFloat(name="MinAUC", default_value=0.85)
+
+trainer = ModelTrainer(
+    training_image=image_uri, source_code=SourceCode(source_dir="src", entry_script="train.py"),
+    role=role, sagemaker_session=session,
+)
+train_step = TrainingStep(name="Train", step_args=trainer.train(input_data_config=[...]))
+
+# Evaluation ProcessingStep writes evaluation.json; PropertyFile exposes it to conditions
+eval_report = PropertyFile(name="EvalReport", output_name="evaluation", path="evaluation.json")
+eval_step = ProcessingStep(name="Evaluate", step_args=..., property_files=[eval_report])
+
+# Register into Model Registry (PendingManualApproval = quality gate for deployment)
+builder = ModelBuilder(model_path=train_step.properties.ModelArtifacts.S3ModelArtifacts,
+                       sagemaker_session=session, role_arn=role)
+register_step = ModelStep(
+    name="RegisterModel",
+    step_args=builder.register(model_package_group_name="churn-model",
+                               approval_status="PendingManualApproval"),
+)  # v3: ModelStep(step_args=ModelBuilder.register()) replaces the removed RegisterModel collection
+
+gate = ConditionStep(
+    name="QualityGate",
+    conditions=[ConditionGreaterThanOrEqualTo(
+        left=JsonGet(step_name=eval_step.name, property_file=eval_report,
+                     json_path="metrics.auc.value"),
+        right=min_auc)],
+    if_steps=[register_step],
+    else_steps=[FailStep(name="BelowThreshold", error_message="AUC below threshold")],
+)
+
+pipeline = Pipeline(name="churn-training", parameters=[min_auc],
+                    steps=[train_step, eval_step, gate], sagemaker_session=session)
+pipeline.upsert(role_arn=role)
+pipeline.start()
+```
+
+Other useful steps: `LambdaStep`, `CallbackStep` (integrate external systems),
+`QualityCheckStep`/`ClarifyCheckStep` (baseline drift gates), `TransformStep`,
+`EMRStep`, and `sagemaker.mlops.workflow.triggers` for cron-style pipeline schedules.
+Step caching (`CacheConfig`) and retry policies mirror the caching/retry patterns in
+sections 15 and 6.
+
+### 20.2 Step Functions for ML
+
+AWS Step Functions orchestrates SageMaker jobs (and anything else on AWS) as state
+machine states -- use it when the workflow spans beyond ML (ETL, human approvals,
+microservices). Optimized integrations exist for `CreateTrainingJob`, `CreateTransformJob`,
+`CreateProcessingJob`, and `CreateEndpoint` with `.sync` variants that wait for completion.
+
+```json
+{
+  "StartAt": "TrainModel",
+  "States": {
+    "TrainModel": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sagemaker:createTrainingJob.sync",
+      "Parameters": {"TrainingJobName.$": "$.job_name", "...": "..."},
+      "Next": "BatchTransform"
+    },
+    "BatchTransform": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sagemaker:createTransformJob.sync",
+      "Parameters": {"TransformJobName.$": "$.transform_name", "...": "..."},
+      "End": true
+    }
+  }
+}
+```
+
+Schedule with EventBridge: a rule (cron or event pattern, e.g. "new object in S3
+prefix") targets the state machine ARN -- `events.put_rule(ScheduleExpression="cron(0 6 * * ? *)")`
++ `put_targets`. EventBridge can also start SageMaker Pipelines directly.
+
+### 20.3 When to Choose Managed vs Self-Hosted Orchestration
+
+| Situation | Prefer |
+|-----------|--------|
+| All-in on SageMaker (training, registry, endpoints) | SageMaker Pipelines -- native lineage, registry integration, zero orchestration infra |
+| Workflow mixes ML with non-ML AWS services (Lambda, Glue, SQS, approvals) | Step Functions |
+| Multi-cloud / on-prem, or heavy non-AWS dependencies | Airflow / Prefect / Dagster |
+| Team already runs Airflow (MWAA or self-hosted) | Keep Airflow; trigger SageMaker jobs via the Amazon provider operators |
+| Need rich local development + testing of DAG logic | Prefect / Dagster (SageMaker Pipelines has limited local mode) |
+| Cost model preference | Managed: pay per step execution/compute, no idle scheduler; self-hosted: fixed infra cost (see 1.3) |
+
+Cross-reference: see the **model-registry** skill for the approval-status promotion
+(`PendingManualApproval` -> `Approved`) that this pipeline's `RegisterModel` step triggers.

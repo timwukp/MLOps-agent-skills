@@ -293,3 +293,8 @@ class GroundTruthCollector:
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for tool comparisons and Grafana templates.
+
+## Related skills
+
+**Upstream:** `model-serving` (prediction logs; training baselines come from `skills/mlops/model-registry/references/ARTIFACT_CONTRACT.md`) · **Downstream:** `model-drift-detection` (metric streams and distributions to test)
+**See also:** `model-observability` for the explainability companion · `llm-observability` for LLM endpoints

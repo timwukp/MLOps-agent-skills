@@ -265,3 +265,8 @@ def transform_query(original_query, llm):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for vector store comparisons and optimization guides.
+
+## Related skills
+
+**Upstream:** `llm-data-preparation` (cleaned, chunk-ready corpus) · **Downstream:** `llm-evaluation` (retrieval + generation quality, e.g. RAGAS)
+**See also:** `llm-prompt-engineering` for the generation prompt · `llm-fine-tuning` when retrieval alone cannot close the quality gap

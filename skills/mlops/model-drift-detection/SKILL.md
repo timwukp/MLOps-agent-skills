@@ -314,3 +314,8 @@ def should_retrain(drift_results, performance_metrics=None, config=None):
 ## References
 
 See [references/REFERENCE.md](references/REFERENCE.md) for test comparisons and threshold guides.
+
+## Related skills
+
+**Upstream:** `model-monitoring` (feature/prediction distributions and performance metrics) · **Downstream:** `model-training` (retraining trigger — this closes the lifecycle loop)
+**See also:** `ml-pipeline-orchestration` to automate the retraining loop · `data-validation` for schema-level checks upstream of drift

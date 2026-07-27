@@ -314,6 +314,88 @@ Garak silently runs nothing if a probe name is wrong, so verify names with
 - Failing to update guardrails when the underlying LLM is upgraded or swapped.
 - Not logging guardrail decisions, making it impossible to audit or improve.
 
+## Managed: Amazon Bedrock Guardrails
+
+Bedrock Guardrails is a managed policy layer with four policy types configured in one guardrail resource: content filters, denied topics, sensitive-information (PII) handling, and contextual grounding checks. Guardrails are versioned (`create_guardrail_version`) and applied by ID + version.
+
+### Create a Guardrail
+
+```python
+import boto3
+bedrock = boto3.client("bedrock")
+
+resp = bedrock.create_guardrail(
+    name="support-bot-guardrail",
+    blockedInputMessaging="Sorry, I can't help with that request.",
+    blockedOutputsMessaging="Sorry, I can't provide that response.",
+    contentPolicyConfig={"filtersConfig": [
+        # types: SEXUAL, VIOLENCE, HATE, INSULTS, MISCONDUCT, PROMPT_ATTACK
+        {"type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE"},
+        {"type": "HATE", "inputStrength": "HIGH", "outputStrength": "HIGH"},
+    ]},
+    topicPolicyConfig={"topicsConfig": [
+        {"name": "financial-advice", "type": "DENY",
+         "definition": "Providing personalized investment or financial advice.",
+         "examples": ["Which stocks should I buy?"]},
+    ]},
+    sensitiveInformationPolicyConfig={
+        "piiEntitiesConfig": [
+            {"type": "EMAIL", "action": "ANONYMIZE"},        # mask in output
+            {"type": "US_SOCIAL_SECURITY_NUMBER", "action": "BLOCK"},
+        ],
+        "regexesConfig": [{"name": "internal-id", "pattern": r"EMP-\d{6}",
+                           "action": "ANONYMIZE"}],
+    },
+    contextualGroundingPolicyConfig={"filtersConfig": [
+        {"type": "GROUNDING", "threshold": 0.75},   # response supported by source?
+        {"type": "RELEVANCE", "threshold": 0.75},   # response relevant to query?
+    ]},
+)
+guardrail_id = resp["guardrailId"]
+bedrock.create_guardrail_version(guardrailIdentifier=guardrail_id)
+```
+
+### Attach to a Converse Call
+
+```python
+runtime = boto3.client("bedrock-runtime")
+resp = runtime.converse(
+    modelId="global.anthropic.claude-sonnet-5",
+    messages=[{"role": "user", "content": [{"text": user_input}]}],
+    guardrailConfig={"guardrailIdentifier": guardrail_id, "guardrailVersion": "1",
+                     "trace": "enabled"},  # trace shows which policy fired
+)
+```
+
+### ApplyGuardrail: Standalone Evaluation for ANY Model
+
+`ApplyGuardrail` evaluates text against a guardrail **without invoking a Bedrock model**, so the same policies can protect self-hosted vLLM, OpenAI, or any other stack -- use it as the input/output rail in the pipelines above:
+
+```python
+result = runtime.apply_guardrail(
+    guardrailIdentifier=guardrail_id, guardrailVersion="1",
+    source="INPUT",   # or "OUTPUT" for model responses
+    content=[{"text": {"text": user_input}}],
+)
+if result["action"] == "GUARDRAIL_INTERVENED":
+    blocked_text = result["outputs"][0]["text"]  # canned message / anonymized text
+```
+
+Contextual grounding via `ApplyGuardrail` works too: pass source documents as `content` entries with `qualifiers: ["grounding_source"]` and the response with `["guard_content"]`.
+
+### vs Library-Based Guardrails
+
+| Aspect | Bedrock Guardrails | Guardrails AI / NeMo / LLM Guard |
+|--------|--------------------|-----------------------------------|
+| Hosting | Managed API; no models to run | You host classifiers/validators |
+| Coverage | Content filters, denied topics, PII (block/anonymize), regex, grounding/relevance | Broader: format/schema validation, custom Python validators, Colang flows |
+| Model coupling | Any model via `ApplyGuardrail`; zero-code attach for Bedrock models | Provider-agnostic by construction |
+| Customization | Configurable thresholds; natural-language topic definitions | Arbitrary code |
+| Cost | Per text-unit evaluated (grounding priced separately) | Compute you run |
+| Audit | Versioned guardrails + trace output; CloudWatch integration | Build your own logging |
+
+Practical pattern: use Bedrock Guardrails for the organization-wide safety/PII baseline (centrally versioned, auditable), and layer library-based validators for app-specific needs (JSON schema enforcement, hallucination checks against retrieved docs, custom business rules). Note the PII anonymize/block scope overlaps Presidio (above) -- prefer one layer as the source of truth to avoid double-masking.
+
 ## Further Reading
 
 - [Guardrails AI Documentation](https://docs.guardrailsai.com/)

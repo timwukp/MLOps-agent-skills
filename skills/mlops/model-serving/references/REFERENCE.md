@@ -264,6 +264,61 @@ def model_fn(model_dir):
 Always delete endpoint + endpoint-config + model when done — Real-Time endpoints bill
 per hour whether or not they receive traffic (Serverless does not).
 
+## Serving from the Model Registry
+
+Serving should pull models from the registry, not from ad-hoc file copies — the registry
+is the single source of truth for "which version is production" (see the **model-registry**
+skill for registration, promotion gates, and alias management).
+
+### MLflow: load by alias
+
+Aliases decouple serving from version numbers: promotion (or rollback) is a one-line
+alias flip in the registry, with no serving redeploy.
+
+```python
+import mlflow.pyfunc
+
+# "@champion" always resolves to whatever version currently holds the alias
+model = mlflow.pyfunc.load_model("models:/fraud-detector@champion")
+predictions = model.predict(features)
+
+# Or pin an exact version / run when reproducing an incident
+model = mlflow.pyfunc.load_model("models:/fraud-detector/3")
+model = mlflow.pyfunc.load_model("runs:/abc123def456/model")
+```
+
+This repo's `scripts/serve_model.py` supports this directly:
+
+```bash
+python scripts/serve_model.py --model-uri "models:/fraud-detector@champion"
+```
+
+### SageMaker: deploy the latest Approved package
+
+With SageMaker Model Registry, `ModelApprovalStatus` plays the alias role — serving
+deploys the newest **Approved** package in the group:
+
+```python
+import boto3
+
+sm = boto3.client("sagemaker")
+latest = sm.list_model_packages(
+    ModelPackageGroupName="churn-model",
+    ModelApprovalStatus="Approved",
+    SortBy="CreationTime", SortOrder="Descending", MaxResults=1,
+)["ModelPackageSummaryList"][0]
+
+sm.create_model(
+    ModelName="churn-model-serving",
+    PrimaryContainer={"ModelPackageName": latest["ModelPackageArn"]},
+    ExecutionRoleArn=role_arn,
+)
+# then create_endpoint_config / create_endpoint as shown in the SageMaker section above
+```
+
+Rollback in both systems is a registry operation (re-point the alias / re-approve the
+prior package), not a rebuild — see the model-registry skill's promotion workflow.
+
 ## Further Reading
 
 - [BentoML Documentation](https://docs.bentoml.com/)
