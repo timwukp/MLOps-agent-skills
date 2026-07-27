@@ -1,12 +1,22 @@
 # Test Results
 
-**Date**: 2026-02-28
-**Python**: 3.14
-**Platform**: macOS (Darwin 25.3.0)
+**Current status (2026-07-27)** · 27 skills · 55 scripts · Python 3.12
+
+| Check | Result |
+|-------|--------|
+| Schema validation (`tests/validate_skills.py`) | **27/27 pass** + README cross-check OK |
+| Script tests (`tests/test_scripts.py`) | **53 pass / 0 fail / 2 expected-skip** (55 scripts) |
+| `py_compile` (all skill scripts) | clean |
+| Live AWS validation (SageMaker registry + serving) | **12/12 checks PASS** — `tests/aws_validation/` |
+| Functional chains (intake→recommender, pipeline generator ×6, promote vs real MLflow registry, cost estimator) | all pass |
+
+Newest changes first; full history below.
 
 ---
 
-## Summary
+## Historical: Initial test run (2026-02-28, 25 skills at the time)
+
+### Summary
 
 | Category | Total | Pass | Partial | Expected Fail |
 |----------|-------|------|---------|---------------|
@@ -112,12 +122,13 @@ All 25 SKILL.md files were reviewed for correctness of code examples, API usage,
 
 ## Schema Validation
 
-All 25 skills validated against the [Agent Skills specification](https://agentskills.io/specification):
+All skills at the time (25) validated against the [Agent Skills specification](https://agentskills.io/specification)
+— re-validated at 27 skills on 2026-07-27, see current status at top:
 
 - Frontmatter: `name`, `description`, `license`, `metadata` present in all
 - Names: lowercase + hyphens, 1-64 chars, match directory names
 - SKILL.md line counts: all under 500 lines (3 were restructured from 1063/1820/1258 to 355/426/487)
-- Directory structure: `SKILL.md`, `scripts/`, `references/` present in all 25
+- Directory structure: `SKILL.md`, `scripts/`, `references/` present in all
 
 ---
 
@@ -133,7 +144,7 @@ All 25 skills validated against the [Agent Skills specification](https://agentsk
 
 ## Update 2026-07-26: Accuracy overhaul + live AWS validation
 
-All 25 skills were deep-reviewed for technical accuracy (5 parallel review passes) and
+All 25 skills existing at the time were deep-reviewed for technical accuracy (5 parallel review passes) and
 ~200 confirmed issues were fixed — full details in the PR description. Highlights:
 
 - **Security-grade fixes**: fabricated MITRE ATLAS IDs replaced with real ones; pip-audit/safety
