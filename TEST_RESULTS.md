@@ -6,6 +6,7 @@
 |-------|--------|
 | Schema validation (`tests/validate_skills.py`) | **27/27 pass** + README cross-check OK |
 | Script tests (`tests/test_scripts.py`) | **53 pass / 0 fail / 2 expected-skip** (55 scripts) |
+| Diagram layout (`tests/check_svg_geometry.py`) | **0 wire crossings / 0 wires through a card** across both lifecycle SVGs |
 | `py_compile` (all skill scripts) | clean |
 | Live AWS validation (SageMaker registry + serving) | **12/12 checks PASS** — `tests/aws_validation/` |
 | Functional chains (intake→recommender, pipeline generator ×6, promote vs real MLflow registry, cost estimator) | all pass |

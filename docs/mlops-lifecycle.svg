@@ -124,7 +124,7 @@
     </g>
   </a>
 
-  <path class="wire" d="M736.0,148 C 736.0,193 118.0,185 118.0,222" marker-end="url(#ahB)"/>
+  <path class="wire" d="M736.0,148 C 736.0,193 118.0,185 118.0,227" marker-end="url(#ahB)"/>
 
   <path class="wireDim" d="M206,259.0 L228,259.0"/>
 
@@ -160,17 +160,15 @@
 
   <path class="wireG" d="M942.0,288 L942.0,362" marker-end="url(#ahG)"/>
 
-  <path class="wireR" d="M846,399.0 L828,399.0" marker-end="url(#ahR)"/>
-
   <path class="wireG" d="M942.0,288 C 942.0,328 736.0,330 736.0,362" marker-end="url(#ahG)"/>
 
-  <path class="wireR" d="M824,409.0 L846,409.0" marker-end="url(#ahR)"/>
+  <path class="wireR" d="M824,399.0 L850,399.0" marker-end="url(#ahR)"/>
 
   <path class="wireDim" d="M412,399.0 L640,399.0"/>
 
-  <path class="wireR" d="M1030,399.0 C 1200,399.0 1200,160 700,160 L 158.0,160 C 118.0,160 118.0,190 120.0,220" marker-end="url(#ahR)"/>
+  <path class="wireR" d="M942.0,428 C 942.0,444 932.0,449 916.0,449 L 40,449 C 14,449 14,423 14,423 L 14,285.0 C 14,259.0 24,259.0 26,259.0" marker-end="url(#ahR)"/>
 
-  <text class="sub" x="1005" y="150" text-anchor="middle" fill="#ff6b81">retraining trigger</text>
+  <text class="sub" x="500" y="444" text-anchor="middle" fill="#ff6b81">retraining trigger</text>
   <rect class="band" x="30" y="470" width="1180" height="100" rx="14"/>
   <text class="bandT" x="50" y="496">CROSS-CUTTING — EVERY STAGE</text>
   <a href="https://github.com/timwukp/MLOps-agent-skills/blob/main/skills/mlops/ml-testing/SKILL.md" target="_top"><g>
