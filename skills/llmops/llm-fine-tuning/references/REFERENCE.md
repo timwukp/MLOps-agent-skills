@@ -173,6 +173,17 @@ Note: Gradient checkpointing reduces memory by approximately 30% at the cost of 
 - **Cause**: Training only on single-turn data or masking conversation history
 - **Solution**: Use multi-turn format (ShareGPT/ChatML). Ensure loss is computed on all assistant turns, not just the last one.
 
+### Managed Training Job Failures (SageMaker DLC, live-verified 2026-07 us-east-1)
+
+Each failed attempt costs a full ~35 min job-startup cycle, so pre-check locally.
+
+| Symptom | Root Cause | Fix |
+|---------|-----------|-----|
+| `ImportError: torch>=2.1.1` at model load | Stale DLC image tag recalled from memory (2023 huggingface-pytorch-training) | Look up the [current DLC list](https://github.com/aws/deep-learning-containers/blob/master/available_images.md) at run time; use the newest pytorch-training GPU image |
+| `NameError: torch is not defined` raised inside transformers' `quantization_config.py` | Container torch below the resolved transformers' floor (silent degradation) | Same as above; let requirements.txt supply the ML stack on a current base |
+| pip resolution failure at job start (e.g. liger-kernel needs `transformers>=4.52` vs `==4.51.3` pin; transformers 4.52+ needs `bitsandbytes>=0.46.1` vs `==0.45.5` pin) | Exact pins conflict with new libraries' floors | Floors-only requirements; verify with `pip install --dry-run` before submitting |
+| CUDA OOM at step 0 despite 4-bit base + gradient checkpointing + batch 1 | fp32 cross-entropy logits tensor = vocab × max_length × 4 bytes (~8 GB for a 151,936 vocab at 14,336 tokens) | `use_liger_kernel=True` in SFTConfig (fused linear CE never materializes full logits) |
+
 ## Further Reading
 
 - [Hugging Face PEFT Documentation](https://huggingface.co/docs/peft)

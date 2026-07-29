@@ -236,6 +236,59 @@ async def chat_stream(request: ChatRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
+### 7. SageMaker LMI Endpoints (DJL + vLLM)
+
+Lessons from a live SageMaker deployment (fine-tuned Qwen3-1.7B on an LMI/vLLM container,
+verified 2026-07 us-east-1). The feedback loop for a bad endpoint config is 30-60 minutes per
+attempt, so validation-left-shift matters more here than anywhere.
+
+**Ship `serving.properties` at the tarball ROOT — it is the canonical LMI config.**
+Env-var-only configuration makes DJL scan the tarball root for engine detection; if the model
+lives in a subdirectory (e.g. `merged/`), registration fails with
+`Failed to detect engine of the model: /opt/ml/model` and the server restart-loops even though
+the vLLM engine initialized successfully (observed: 22 successful engine inits, zero
+successful registrations).
+
+```properties
+# serving.properties — at the tarball root, not inside the model subdir
+engine=Python
+option.model_id=/opt/ml/model/merged
+option.rolling_batch=vllm
+option.dtype=fp16
+option.max_model_len=14336
+option.gpu_memory_utilization=0.9
+option.max_rolling_batch_size=8
+```
+
+**Validate container env vars against the container's documented config BEFORE
+create-endpoint.** `SERVING_LOAD_MODELS` is a local-serving option; on SageMaker it makes DJL
+parse the literal string as a model URL and crash-loop. On lmi15 (vLLM-native) images,
+`OPTION_ROLLING_BATCH=disable` routes to the legacy HF handler, which fails at init
+(`'list' object has no attribute 'keys'`); the supported path is `rolling_batch=vllm`.
+
+**A `Creating` endpoint can be neither deleted nor updated** (live
+`ValidationException: Cannot update in-progress endpoint`) — a bad config's punishment is
+waiting for `Failed`, 30-60 minutes of billing. Smoke-test new configs cheaply first, and
+ALWAYS record the endpoint name plus a teardown instruction to S3 *before* `create-endpoint`
+so it can never become an unaccounted orphan.
+
+**Watch train/serve version skew.** Training with transformers 5.x writes
+`tokenizer_config.json` fields (e.g. `extra_special_tokens` as a list) that older container
+transformers crash on (`AttributeError: 'list' object has no attribute 'keys'` inside
+`AutoTokenizer.from_pretrained`). Either match the serving container's transformers family or
+post-process the artifact.
+
+**Long generations need the streaming API.** Synchronous `InvokeEndpoint` has a hard 60s
+timeout — a long chain-of-thought generation (roughly >2k tokens on small instances) cannot
+complete synchronously. Use `invoke_endpoint_with_response_stream`, which is
+inactivity-bounded with no wall-clock ceiling. Also budget tokens: effective
+`max_new_tokens = max_model_len − prompt tokens`.
+
+**Plan teardown for least-privilege roles.** Roles often grant `CreateModel`/`DeleteEndpoint`
+but NOT `DeleteModel`/`DeleteEndpointConfig`/`List*` — plan teardown around known-name
+deletion and track created resource names as you go. Scope deletions strictly by name prefix:
+a naive delete-all would have hit an unrelated 2-year-old production endpoint.
+
 ## Serving Framework Comparison
 
 | Feature | vLLM | TGI | Ollama | llama.cpp |

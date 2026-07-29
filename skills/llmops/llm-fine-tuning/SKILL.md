@@ -214,6 +214,11 @@ tokenizer.save_pretrained("./merged-model")
 # llama-quantize model-f16.gguf model-Q4_K_M.gguf Q4_K_M
 ```
 
+**Train/serve skew**: the training stack's transformers version affects artifact compatibility —
+transformers 5.x writes `tokenizer_config.json` keys (e.g. `extra_special_tokens`) that older
+serving containers cannot parse; coordinate the serving container's transformers family when
+choosing training floors, or post-process the artifact.
+
 ### 6. Training Data Quality
 
 ```python
@@ -244,6 +249,48 @@ def validate_training_data(dataset):
 
     return issues
 ```
+
+### 7. Containers and Dependencies for Managed Training Jobs
+
+Lessons from a live SageMaker fine-tuning run (Qwen3-1.7B QLoRA, verified 2026-07 us-east-1).
+Each missed check below cost a full ~35 min training-job startup cycle before failing.
+
+**Never recall Deep Learning Container (DLC) image tags from memory** — memorized tags are
+structurally always stale. Look up the authoritative list at run time:
+[aws/deep-learning-containers available_images.md](https://github.com/aws/deep-learning-containers/blob/master/available_images.md).
+Prefer the newest `pytorch-training` GPU SageMaker image and let `requirements.txt` supply the
+ML stack. Stale images fail in misleading ways: a 2023 huggingface-pytorch-training image
+raised `ImportError: torch>=2.1.1` for Qwen3; a pytorch-training:2.3.0 image whose torch sat
+below the resolved transformers' floor surfaced as `NameError: torch is not defined` raised
+*inside* transformers' `quantization_config.py` — a silent-degradation trap, not a torch bug.
+
+**Pre-check dependency floors before submitting the job** — verify each new library's version
+floors against existing pins (`pip install --dry-run` locally, or read the library's
+requirements). Real conflicts caught only after job startup: liger-kernel needs
+`transformers>=4.52` but `==4.51.3` was pinned; transformers 4.52+ raised the bitsandbytes
+floor to `>=0.46.1` above an `==0.45.5` pin.
+
+**Use floors-only requirements for fast-moving HF stacks** — exact pins caused 2 of 5 failures
+in that run; a floors-only set on the newest DLC resolved cleanly first try. Let pip solve the
+whole constraint set at once:
+
+```text
+# requirements.txt — floors only, let pip resolve
+transformers>=4.52
+trl>=0.17
+peft>=0.15
+accelerate>=1.6
+bitsandbytes>=0.46.1
+datasets>=3.5
+liger-kernel>=0.5.8
+```
+
+**Use Liger kernel for large-vocab, long-context QLoRA** — the cross-entropy logits tensor is
+`vocab_size × max_length × 4 bytes` in fp32: Qwen3's 151,936-token vocab at 14,336 max_length
+is ~8 GB for that tensor alone, OOMing a 24 GB A10G at step 0 even with a 4-bit base, gradient
+checkpointing, and batch size 1. `use_liger_kernel=True` in `SFTConfig` fixes this (fused
+linear cross-entropy never materializes the full logits tensor) — validated end-to-end (train +
+merge) on ml.g5.2xlarge. Prefer memory-side fixes over truncating verified training data.
 
 ## LoRA Hyperparameter Guide
 

@@ -233,6 +233,17 @@ These are the Anthropic first-party rates; Bedrock is partner-operated and its p
 
 If you must self-host an open-weight model (Llama, Mistral, Qwen) on AWS -- e.g. for a custom fine-tune Bedrock doesn't serve -- SageMaker JumpStart deploys them to managed GPU endpoints in a few calls (containers typically run vLLM or TGI via the Large Model Inference images). You still pay per-GPU-hour, but AWS manages provisioning, autoscaling, and health checks; the hardware sizing guidance above applies to instance selection (e.g. `ml.g5.12xlarge` for a 70B 4-bit model). This sits between Bedrock (no infra) and raw vLLM on EC2/EKS (full control).
 
+### SageMaker LMI Endpoint Failure Modes (live-verified 2026-07, us-east-1)
+
+| Symptom | Root Cause | Fix |
+|---------|-----------|-----|
+| `Failed to detect engine of the model: /opt/ml/model`, restart loop despite successful vLLM engine inits | Env-var-only config; model in a subdirectory so DJL's tarball-root scan finds nothing | `serving.properties` at the tarball root with `option.model_id=/opt/ml/model/<subdir>` |
+| Crash loop, DJL treats a literal string as a model URL | `SERVING_LOAD_MODELS` set (local-serving-only option) | Remove it; configure via `serving.properties` |
+| `'list' object has no attribute 'keys'` at handler init on lmi15 | `OPTION_ROLLING_BATCH=disable` routes to the legacy HF handler | Use `option.rolling_batch=vllm` (the supported path on vLLM-native images) |
+| `AttributeError: 'list' object has no attribute 'keys'` inside `AutoTokenizer.from_pretrained` | Artifact trained with transformers 5.x (`extra_special_tokens` list) served by older container transformers | Match transformers families across train/serve, or post-process `tokenizer_config.json` |
+| Response truncated / connection closed at ~60s | Synchronous `InvokeEndpoint` hard 60s timeout on long generations | `invoke_endpoint_with_response_stream` (inactivity-bounded, no wall-clock ceiling) |
+| `ValidationException: Cannot update in-progress endpoint` | Endpoints in `Creating` can be neither deleted nor updated | Wait for `Failed`; smoke-test configs first; record endpoint name to S3 before `create-endpoint` |
+
 ## Further Reading
 
 - [vLLM Documentation](https://docs.vllm.ai/)
