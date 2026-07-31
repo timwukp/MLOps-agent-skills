@@ -226,6 +226,40 @@ same sampling settings you will deploy the student with. Baseline the *un-tuned*
 too: if base student = 45% and distilled = 71%, distillation added 26 points; without the
 baseline you cannot attribute the gain.
 
+### 7. Driving Student Eval as an Autonomous Agent (live-verified 2026-07, us-east-1)
+
+Lessons from an agent-orchestrated QLoRA distillation run (Qwen3-1.7B student, SageMaker
+`ml.g5.2xlarge`) where the eval is a verifiable-reward scorer, not an LLM judge:
+
+- **Never trust training loss** — decide "more epochs?" only from a held-out eval. The run
+  finished 1 epoch at train loss 0.21 / eval loss 0.50; neither number predicts the solve
+  rate. Eval the held-out tasks BEFORE spending on epoch 2.
+- **Split generation (GPU) from scoring (CPU) into separate processes.** The GPU job loads
+  the merged model and writes `generations.jsonl` **incrementally** (an interrupted run
+  still yields a scorable partial file); the scorer runs anywhere without torch. A scoring
+  bug then never costs GPU time to re-fix, and the scorer stays unit-testable.
+- **Greedy decoding for the gate.** The eval gate must be reproducible; sampling makes the
+  solve rate a distribution rather than a number. (This intentionally departs from the
+  temperature-0.5–0.7 guidance above, which is for *teacher generation*, not student gating.)
+- **The base-model baseline needs its thinking mode suppressed.** An un-tuned reasoning
+  student (Qwen3) opens a `<think>` chain and can spend the entire token budget inside it,
+  emitting no answer — scored naively that reads as "the base model can't do the task" when
+  the real cause is decoding budget, which inflates the apparent distillation lift. Pass
+  `enable_thinking=False` for the baseline, and **verify the chat template actually honors
+  the flag before spending GPU** (templates accept unknown Jinja vars in silence; on the
+  real Qwen3 template only `False` changes the rendering — `True` and absent are identical).
+- **Render eval prompts through the SAME chat template used in training.** A mismatch
+  silently tanks the solve rate while the model is fine.
+- **Launch-and-release, never wait in-session.** A multi-hour training/generation job must
+  not be awaited inside an agent turn: record the job name to the manifest, exit the turn,
+  and let an event (EventBridge job-state rule → Step Functions task token) re-invoke a
+  fresh session on completion. Budget-bound the job itself (`max_train_seconds`) so a hang
+  converts to a checkpointed stop, not an open-ended bill.
+- **Validate the scorer with negative controls before trusting any lift number** — see
+  `llm-evaluation` §6 (Negative Controls): an oracle self-test cannot catch a scorer that
+  accepts too much, and format-validity is the tiebreak metric precisely when both solve
+  rates are 0.000 — the expected case for a small student on a hard benchmark.
+
 ## Anti-Patterns
 
 1. **Distilling from a forbidden teacher** — check the license/ToS first. DeepSeek-R1 (MIT)
