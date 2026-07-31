@@ -263,6 +263,46 @@ class LLMEvaluator:
         return {"per_example": results, "aggregated": aggregated}
 ```
 
+### 6. Validate the Scorer Itself: Negative Controls
+
+An oracle self-test (known-good solutions score 1.0) proves only that the scorer does not
+REJECT correct outputs. It cannot detect a scorer that ACCEPTS too much — the failure mode
+that silently inflates every downstream gate. Before trusting a verifiable-reward scorer,
+run negative controls: inputs with one known defect each, asserting the metric moves the
+right way (live-verified 2026-07, ARC code-distillation eval, 200 real val rows):
+
+| Control | Expected solve | Expected format-valid |
+|---------|---------------|----------------------|
+| Oracle (verified code) | 1.000 | 1.000 |
+| Trivial identity (`return grid`) | 0.000 | 1.000 — wrong, not malformed |
+| Verified code from the WRONG task | ~0.005 | 1.000 |
+| Code that does not compile | 0.000 | 0.000 |
+| Prose, no code at all | 0.000 | 0.000 |
+| Infinite loop | 0.000 (timeout) | 1.000 |
+
+What the controls caught in that run: format validity was regex-matching the function
+signature, and a generation truncated mid-expression still carries the signature — 200
+unparseable stubs scored format 1.000. The fix is to `compile()` the extracted code **in
+the scorer**: a SyntaxError is a property of the text, not of any input pair, whereas the
+sandbox reports it once per test pair, indistinguishable from a runtime crash.
+
+Rules that generalize:
+
+- **Format-valid must mean "parses"**, not "matched an extraction regex". Compile/parse the
+  extracted artifact before counting it well-formed.
+- **Separate failure taxonomies with different remediations**: code-that-doesn't-parse
+  (`unparseable_code`) vs no-code-emitted (`no_transform_emitted`) — only the second is
+  fixed by raising the generation token budget.
+- **Format validity is load-bearing at zero solve rates.** For a small student on a hard
+  benchmark, base-vs-tuned solve rates of 0.000 vs 0.000 are the expected case, and the
+  lift verdict falls through to format validity — two garbage runs must not compare as two
+  perfect 1.000s.
+- **Expect a nonzero cross-task coincidence floor** and document it (1/200 on ARC — some
+  transformations coincide on small grids), so a future ~0.005 is not misread as leakage.
+- **Mutation-check the guard's tests**: delete the check — its tests must fail; and include
+  a negative-control test (code that compiles then crashes at runtime must STAY
+  format-valid) so the guard discriminates *malformed* from *wrong* instead of rejecting both.
+
 ## Evaluation Metrics by Task
 
 | Task | Key Metrics |
