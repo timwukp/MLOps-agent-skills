@@ -4,7 +4,7 @@ description: >
   Design and implement feature engineering pipelines for ML models. Covers numerical transformations (scaling,
   normalization, binning, polynomial), categorical encoding (one-hot, target, ordinal, hashing), text features
   (TF-IDF, embeddings, tokenization), image features (CNN extraction, augmentation), time-series features (lag,
-  rolling, Fourier), missing value imputation (KNN, MICE), feature selection (mutual info, SHAP, RFE, L1),
+  rolling, Fourier; point-in-time correct, per entity), missing value imputation (KNN, MICE), feature selection (mutual info, SHAP, RFE, L1),
   automated feature engineering (Featuretools, tsfresh), scikit-learn Pipelines, ColumnTransformer, dimensionality
   reduction (PCA, UMAP), and production feature pipeline best practices.
 license: Apache-2.0
@@ -130,23 +130,30 @@ df["avg_word_length"] = df["text"].apply(
 ### 4. Time-Series Features
 
 ```python
-def create_time_features(df, date_col="date", target_col="value"):
-    """Create comprehensive time-series features."""
-    df = df.sort_values(date_col).copy()
+def create_time_features(df, date_col="date", target_col="value", entity_col=None):
+    """Time-series features that use only values from before each row.
 
-    # Lag features
+    Assumes one row per entity per period. Lags and windows stay within each entity and
+    start at the previous row, so no row sees its own target. If a source arrives late,
+    shift by its availability delay instead (model-training references/TEMPORAL_VALIDATION.md).
+    """
+    df = df.sort_values([entity_col, date_col] if entity_col else date_col).copy()
+    groups = df[entity_col] if entity_col else pd.Series(0, index=df.index)
+    target = df[target_col].groupby(groups)
+
+    # Lag features (lag >= 1)
     for lag in [1, 7, 14, 28]:
-        df[f"lag_{lag}"] = df[target_col].shift(lag)
+        df[f"lag_{lag}"] = target.shift(lag)
 
-    # Rolling statistics
+    # Rolling and expanding statistics over strictly earlier values
+    past = target.shift(1).groupby(groups)
     for window in [7, 14, 30]:
-        df[f"rolling_mean_{window}"] = df[target_col].rolling(window).mean()
-        df[f"rolling_std_{window}"] = df[target_col].rolling(window).std()
-        df[f"rolling_min_{window}"] = df[target_col].rolling(window).min()
-        df[f"rolling_max_{window}"] = df[target_col].rolling(window).max()
-
-    # Expanding statistics
-    df["expanding_mean"] = df[target_col].expanding().mean()
+        rolling = past.rolling(window, min_periods=window)
+        for stat in ["mean", "std", "min", "max"]:
+            df[f"rolling_{stat}_{window}"] = (
+                getattr(rolling, stat)().reset_index(level=0, drop=True)
+            )
+    df["expanding_mean"] = past.expanding().mean().reset_index(level=0, drop=True)
 
     # Date features
     df["day_of_week"] = df[date_col].dt.dayofweek
@@ -272,7 +279,9 @@ X_umap = reducer.fit_transform(X_scaled)
 ## Best Practices
 
 1. **Build sklearn Pipelines** - Ensure train/serve consistency
-2. **Avoid data leakage** - Fit transformers on train data only
+2. **Avoid data leakage** - Fit transformers on train data only; for time-ordered data, use only
+   values available at prediction time (see `model-training`
+   [references/TEMPORAL_VALIDATION.md](../model-training/references/TEMPORAL_VALIDATION.md))
 3. **Handle unknown categories** - Use `handle_unknown="ignore"` in encoders
 4. **Version feature pipelines** - Save fitted transformers as artifacts
 5. **Document feature semantics** - What each feature means and how it's computed
