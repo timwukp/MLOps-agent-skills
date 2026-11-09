@@ -41,6 +41,11 @@ jobs:
       - name: Run --help tests on all scripts
         run: python tests/test_scripts.py --verbose
 
+      - name: Skill script tests
+        run: |
+          pip install pytest
+          python -m pytest tests/skill_scripts -q
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

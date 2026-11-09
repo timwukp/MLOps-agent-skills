@@ -262,6 +262,10 @@ def validate_schema_evolution(current_schema, new_schema):
 8. **Test edge cases** - Empty datasets, single-row datasets, extreme values
 9. **Document exceptions** - When you skip validation, document why
 10. **Monitor validation pass rates** - Track the trend of validation failures
+11. **Check temporal integrity** - For time-indexed data, check duplicate entity/timestamp keys,
+    gaps and irregular frequency, timezone/DST handling, and event time vs. arrival time
+    before training (see `model-training`
+    [references/TEMPORAL_VALIDATION.md](../model-training/references/TEMPORAL_VALIDATION.md))
 
 ## Scripts
 

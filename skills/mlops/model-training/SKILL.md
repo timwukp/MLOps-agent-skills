@@ -4,8 +4,10 @@ description: >
   Design and run ML model training pipelines with PyTorch, TensorFlow, scikit-learn, XGBoost, LightGBM, and
   HuggingFace. Covers hyperparameter tuning (Optuna, Ray Tune, Bayesian optimization), distributed training
   (DDP, DeepSpeed, FSDP, Horovod), mixed precision training (AMP, bf16), learning rate scheduling, early stopping,
-  checkpointing, cross-validation, GPU memory optimization (gradient accumulation, gradient checkpointing),
-  reproducibility, and config-driven training pipeline design. Use when training models, tuning hyperparameters,
+  checkpointing, cross-validation, temporal validation and leakage prevention for time-series, forecasting,
+  sensor/IoT and event-prediction data (point-in-time features, label maturity, backtesting), GPU memory
+  optimization (gradient accumulation, gradient checkpointing), reproducibility, and config-driven training
+  pipeline design. Use when training models, tuning hyperparameters, choosing an evaluation or split strategy,
   setting up distributed training, or optimizing training performance.
 license: Apache-2.0
 metadata:
@@ -15,6 +17,13 @@ metadata:
 ---
 
 # Model Training
+
+## Time-ordered data
+
+If rows have a time order (forecasting, failure/event prediction, churn, sensors, logs),
+read [Temporal validation](references/TEMPORAL_VALIDATION.md) before building features or
+choosing a split, whatever framework you use. Random K-fold, ungrouped or unshifted
+rolling features, and immature labels are the most common sources of inflated scores.
 
 ## Overview
 
@@ -285,7 +294,8 @@ from sklearn.model_selection import cross_val_score, StratifiedKFold
 import xgboost as xgb
 import lightgbm as lgb
 
-# Cross-validation
+# Cross-validation: shuffled K-fold assumes exchangeable rows. For time-ordered data or
+# repeated entities, use time-based or grouped folds (references/TEMPORAL_VALIDATION.md).
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 # XGBoost
@@ -343,7 +353,7 @@ with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
 5. **Use mixed precision** - Almost free speedup on modern GPUs
 6. **Gradient accumulation** before requesting more GPUs
 7. **Early stopping** to avoid overfitting and wasted compute
-8. **Cross-validate** for robust evaluation
+8. **Cross-validate** for robust evaluation, with folds that match deployment (time or entity splits when applicable)
 9. **Profile before optimizing** - Find actual bottlenecks first
 10. **Save checkpoints** regularly for crash recovery
 
@@ -351,10 +361,14 @@ with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
 
 - `scripts/train_model.py` - Config-driven multi-framework training
 - `scripts/distributed_train.py` - PyTorch DDP distributed training
+- `scripts/check_split_leakage.py` - Framework-independent leakage checks on actual train/valid/test files (pandas only)
+- `scripts/execution_record.py` - Record, check and verify what custom code actually executed (standard library only)
 
 ## References
 
-See [references/REFERENCE.md](references/REFERENCE.md) for framework comparisons and tuning guides.
+See [references/REFERENCE.md](references/REFERENCE.md) for framework comparisons and tuning guides,
+and [references/TEMPORAL_VALIDATION.md](references/TEMPORAL_VALIDATION.md) for temporal splits,
+feature availability, label maturity and leakage checks.
 
 ## Related skills
 

@@ -270,7 +270,9 @@ class TestTrainingPipeline:
 2. **Use behavioral tests** - More robust than exact value assertions
 3. **Automate quality gates** in CI/CD before model promotion
 4. **Test on representative slices** not just overall metrics
-5. **Keep test data separate** from training data
+5. **Keep test data separate** from training data; for time-ordered data, assert split cutoffs,
+   label maturity and entity separation on the actual frames (see `model-training`
+   [references/TEMPORAL_VALIDATION.md](../model-training/references/TEMPORAL_VALIDATION.md))
 6. **Use synthetic data** for edge case testing
 7. **Test model serving** endpoints, not just model objects
 8. **Run tests on every commit** and before every deployment
