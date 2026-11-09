@@ -220,8 +220,8 @@ def test_cli_files_hashes_and_exit_codes(panel, tmp_path, capsys):
 def test_cli_single_file_with_split_column(panel, tmp_path, capsys):
     cutoff = START + 6 * 24 * H
     data = panel.assign(part=np.where(panel["timestamp"] < cutoff, "train", "test"))
-    path = tmp_path / "data.parquet"
-    data.to_parquet(path)
+    path = tmp_path / "data.csv"
+    data.to_csv(path, index=False)
     args = ["--input", str(path), "--split-column", "part", "--order", "train,test",
             "--time-column", "timestamp", "--label-window", "24h"]
     assert leak.main(args) == 1
