@@ -217,7 +217,12 @@ When the history of test usage is unknown, say so.
 ## 8. Verify, don't assume
 
 Write checks against the frames you actually trained and evaluated on, not against the
-intended design. Useful assertions:
+intended design. `scripts/check_split_leakage.py` in this skill runs the common checks on
+saved split files (CSV/Parquet, pandas only) and writes a JSON report with input hashes:
+time order and gaps, label maturity, entity overlap, duplicate keys, rows copied across
+splits, and single features that nearly determine the target. Checks it cannot run
+without settings are reported as skipped, not passed. It does not replace the
+point-in-time replay below. Useful assertions in your own code:
 
 ```python
 def check_temporal_split(train, valid, time_col, cutoff, entity=None,
