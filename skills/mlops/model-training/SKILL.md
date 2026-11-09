@@ -362,6 +362,7 @@ with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
 - `scripts/train_model.py` - Config-driven multi-framework training
 - `scripts/distributed_train.py` - PyTorch DDP distributed training
 - `scripts/check_split_leakage.py` - Framework-independent leakage checks on actual train/valid/test files (pandas only)
+- `scripts/execution_record.py` - Record, check and verify what custom code actually executed (standard library only)
 
 ## References
 
